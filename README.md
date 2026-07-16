@@ -1,4 +1,4 @@
-# afm-translate-action
+# translation-framework-action
 
 A GitHub Action that translates `.xcstrings` (or `.strings` / Markdown) files using the Apple Translation framework on a self-hosted macOS runner.
 
@@ -8,7 +8,7 @@ A GitHub Action that translates `.xcstrings` (or `.strings` / Markdown) files us
 ## Usage
 
 ```yaml
-- uses: runbot-hq/afm-translate-action@v1
+- uses: runbot-hq/translation-framework-action@v1
   with:
     input: Sources/App/Localizable.xcstrings
     output: Sources/App/
@@ -57,7 +57,7 @@ jobs:
 
       - name: Translate
         id: translate
-        uses: runbot-hq/afm-translate-action@v1
+        uses: runbot-hq/translation-framework-action@v1
         with:
           input: Sources/App/Localizable.xcstrings
           output: Sources/App/
