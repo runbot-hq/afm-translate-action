@@ -53,7 +53,9 @@ function isFatalTranslateError(e: unknown): boolean {
     msg.includes('language pack not installed') ||
     msg.includes('unsupported language pair') ||
     msg.includes('requires macos 26') ||
-    msg.includes('translation framework') ||
+    // 'translation framework' match intentionally removed: it was over-broad and matched
+    // transient crash messages that should be retried. The two cases it was meant to catch
+    // (requiresmacOS26, languagePackNotInstalled) are already covered by the lines above.
     msg.includes('eacces') ||
     msg.includes('not authorized') ||
     msg.includes('mdm policy')
