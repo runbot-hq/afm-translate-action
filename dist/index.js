@@ -25737,6 +25737,13 @@ function translateCli(bin, args) {
  *   'translation framework requires macos 26+' → 'requires macos 26'  ✔
  *   'language pack not installed for ...'      → 'language pack not installed'  ✔
  *   'unsupported language pair: xx-YY'         → 'unsupported language pair'  ✔
+ *
+ * COUPLING NOTE: 'unsupported language pair' is a string owned by THIS codebase —
+ * it comes from TranslationEngineError.unsupportedPair's Swift `description`, not from
+ * Apple. If that description string ever changes in TranslationEngine.swift, this match
+ * silently stops firing and the locale gets retried instead of being marked fatal.
+ * When editing TranslationEngineError.unsupportedPair's description in Swift, update
+ * this substring to match.
  *   permission/sandbox errors                  → 'eacces' / 'not authorized'  ✔
  *
  * macOS 26.0–26.3 caveat: on those OS versions, TranslationEngine skips the
@@ -25992,7 +25999,10 @@ async function run() {
             .addRaw(`**Input:** \`${input}\`\n`)
             .addRaw(`**Languages:** ${languages || '(from config)'}\n`)
             .addRaw(`**Quality:** ${quality}\n`)
-            .addRaw(`**Keys translated:** ${keysTranslated}\n`)
+            // In markdown mode keys_translated is 0 or 1 (the document is one unit, not a key count).
+            // Label it differently so callers reading the summary aren't confused by "Keys translated: 1"
+            // on a multi-locale markdown run.
+            .addRaw(`**Keys translated:** ${keysTranslated}${format === 'markdown' ? ' (document)' : ''}\n`)
             .addRaw(`**Completed:** ${languagesCompleted.join(', ') || '(none)'}\n`)
             .addRaw(languagesFailed.length > 0 ? `**Failed:** ${languagesFailed.join(', ')}\n` : '')
             .addRaw(`**Runner:** ${process.env.RUNNER_NAME ?? 'unknown'}\n`)
