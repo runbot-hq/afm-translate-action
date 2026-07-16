@@ -54,7 +54,7 @@ function translateCli(bin: string, args: string[]): { stdout: string; stderr: st
  *
  * macOS 26.0–26.3 caveat: on those OS versions, TranslationEngine skips the
  * LanguageAvailability preflight check (API requires 26.4). If a language pack is missing,
- * Apple’s framework throws an opaque error whose message is NOT controlled by us and may
+ * Apple's framework throws an opaque error whose message is NOT controlled by us and may
  * NOT match 'language pack not installed' below. In that case isFatalTranslateError returns
  * false and the error is retried once — harmless but inefficient. If you observe spurious
  * retries on 26.0–26.3 runners for missing packs, identify the opaque error substring and
@@ -128,10 +128,13 @@ function parseOutput(stdout: string): {
 
 async function run(): Promise<void> {
   try {
-    // `core.isDebug()` reads `RUNNER_DEBUG`, not `ACTIONS_STEP_DEBUG`.
-    // Setting ACTIONS_STEP_DEBUG at runtime has no effect on `core.debug()` calls
-    // in the same process — they all call `isDebug()` which checks RUNNER_DEBUG.
-    if (core.getInput('debug') === 'true') process.env.RUNNER_DEBUG = '1'
+    // Resolve debug early — used both for core.debug() gating and --debug flag passthrough.
+    // NOTE: core.isDebug() reads RUNNER_DEBUG (set by the runner at process startup).
+    // Setting ACTIONS_STEP_DEBUG at runtime in the same process has no effect on
+    // core.isDebug() — the runner does not re-read it after startup. The debug input
+    // therefore controls CLI verbosity via --debug (passed to translate-cli-bin below),
+    // not via ACTIONS_STEP_DEBUG. Do NOT reintroduce the ACTIONS_STEP_DEBUG assignment.
+    const debugInput = core.getInput('debug') === 'true'
 
     const actionPath = process.env.GITHUB_ACTION_PATH ?? path.join(__dirname, '..')
 
@@ -248,6 +251,14 @@ async function run(): Promise<void> {
       args.push('--manifest', manifest)
     }
 
+    // Pass --debug to the CLI when the debug input is 'true'.
+    // This drives verbose stderr logging in translate-cli directly.
+    // Do NOT use ACTIONS_STEP_DEBUG for this — setting it at runtime has no effect
+    // on core.isDebug() because the runner reads RUNNER_DEBUG at process startup.
+    if (debugInput) {
+      args.push('--debug')
+    }
+
     core.info(`[translate] Running translate-cli for languages: ${languages || config || '(from config)'}`)
     core.info(`[translate] Input: ${input} → Output: ${resolvedOutput}`)
 
@@ -312,24 +323,13 @@ async function run(): Promise<void> {
     await core.summary
       .addHeading('🌐 Translation Complete')
       .addRaw(`**Input:** \`${input}\`\n`)
-      .addRaw(`**Languages:** ${languages || languagesCompleted.join(', ') || '(from config)'}\n`)
+      .addRaw(`**Languages:** ${languages || '(from config)'}\n`)
       .addRaw(`**Quality:** ${quality}\n`)
-      .addRaw(`**Keys translated:** ${keysTranslated} *(pre-flight estimate — use Completed for success)*\n`)
+      .addRaw(`**Keys translated:** ${keysTranslated}\n`)
       .addRaw(`**Completed:** ${languagesCompleted.join(', ') || '(none)'}\n`)
       .addRaw(languagesFailed.length > 0 ? `**Failed:** ${languagesFailed.join(', ')}\n` : '')
       .addRaw(`**Runner:** ${process.env.RUNNER_NAME ?? 'unknown'}\n`)
       .write()
-
-    // Summary intentionally shows the caller-supplied `languages` input (or "from config")
-    // rather than the resolved final locale list. The authoritative post-run result is the
-    // outputs above: languages_completed and languages_failed. Keeping the summary input-shaped
-    // makes it obvious which mode invoked the action (`languages` vs `config`) and avoids a
-    // future reviewer "fixing" this into a misleading hybrid of requested vs completed locales.
-    //
-    // NOTE: `keys_translated` in the summary is the pre-flight diff count (source strings that
-    // changed), NOT the per-locale success count. It can be > 0 even when every locale failed.
-    // Do not use `keys_translated` from the summary to infer translation success; use
-    // `languages_completed` (step output) for that — it is empty when every locale failed.
 
     // Step failure policy: fail hard only when EVERY language failed (nothing was written).
     //
