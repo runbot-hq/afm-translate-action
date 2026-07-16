@@ -51,6 +51,14 @@ function translateCli(bin: string, args: string[]): { stdout: string; stderr: st
  * - Permission / MDM policy denied — infrastructure issue, not transient
  *
  * Non-fatal (retry may help): model cold-start, temporary framework crash, I/O blip.
+ *
+ * macOS 26.0–26.3 caveat: on those OS versions, TranslationEngine skips the
+ * LanguageAvailability preflight check (API requires 26.4). If a language pack is missing,
+ * Apple’s framework throws an opaque error whose message is NOT controlled by us and may
+ * NOT match 'language pack not installed' below. In that case isFatalTranslateError returns
+ * false and the error is retried once — harmless but inefficient. If you observe spurious
+ * retries on 26.0–26.3 runners for missing packs, identify the opaque error substring and
+ * add it here. See also: TranslationEngine.swift macOS 26.0–26.3 fallback branch comment.
  */
 function isFatalTranslateError(e: unknown): boolean {
   const msg = String(e).toLowerCase()
@@ -256,10 +264,14 @@ async function run(): Promise<void> {
     }
 
     if (!stdout.trim()) {
-      // Empty stdout is unexpected but not necessarily fatal — translate-cli always emits
-      // the three key=value lines even when keys_translated=0. Warn rather than throw
-      // so callers can inspect runner logs.
-      core.warning('[translate] translate-cli produced no output — translation may have found nothing to translate')
+      // Empty stdout means translate-cli exited 0 but produced no output at all.
+      // This should never happen: translate-cli always emits the three key=value lines
+      // even when keys_translated=0 (genuine nothing-to-do). An empty stdout therefore
+      // indicates a silent binary crash or unexpected early exit — not a legitimate no-op.
+      // We fail the step explicitly here so callers don't see a spurious green run with
+      // zero outputs and no indication anything went wrong.
+      core.setFailed('[translate] translate-cli produced no stdout — binary may have crashed silently. Check runner logs for stderr output.')
+      return
     }
 
     const { keysTranslated, languagesCompleted, languagesFailed } = parseOutput(stdout)
