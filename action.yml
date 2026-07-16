@@ -5,6 +5,8 @@ description: >
   Returns keys_translated and languages_completed as outputs.
   Does not commit or push any changes — callers are responsible for
   committing the resulting translated files and the .translation-manifest.json.
+  Maximum wall time: ~10 min (two 5-minute attempts with a 10-second delay between
+  them). Set job.timeout-minutes accordingly if your workflow has a tight cap.
 author: runbot-hq
 
 # Minimum permissions required for this action.
