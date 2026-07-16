@@ -25943,6 +25943,11 @@ async function run() {
         // outputs above: languages_completed and languages_failed. Keeping the summary input-shaped
         // makes it obvious which mode invoked the action (`languages` vs `config`) and avoids a
         // future reviewer "fixing" this into a misleading hybrid of requested vs completed locales.
+        //
+        // NOTE: `keys_translated` in the summary is the pre-flight diff count (source strings that
+        // changed), NOT the per-locale success count. It can be > 0 even when every locale failed.
+        // Do not use `keys_translated` from the summary to infer translation success; use
+        // `languages_completed` (step output) for that — it is empty when every locale failed.
         // Step failure policy: fail hard only when EVERY language failed (nothing was written).
         //
         // Partial failure (some locales failed, others completed) is intentionally NOT a step
