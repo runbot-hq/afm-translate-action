@@ -346,7 +346,10 @@ async function run(): Promise<void> {
       .addRaw(`**Input:** \`${input}\`\n`)
       .addRaw(`**Languages:** ${languages || '(from config)'}\n`)
       .addRaw(`**Quality:** ${quality}\n`)
-      .addRaw(`**Keys translated:** ${keysTranslated}\n`)
+      // In markdown mode keys_translated is 0 or 1 (the document is one unit, not a key count).
+      // Label it differently so callers reading the summary aren't confused by "Keys translated: 1"
+      // on a multi-locale markdown run.
+      .addRaw(`**Keys translated:** ${keysTranslated}${format === 'markdown' ? ' (document)' : ''}\n`)
       .addRaw(`**Completed:** ${languagesCompleted.join(', ') || '(none)'}\n`)
       .addRaw(languagesFailed.length > 0 ? `**Failed:** ${languagesFailed.join(', ')}\n` : '')
       .addRaw(`**Runner:** ${process.env.RUNNER_NAME ?? 'unknown'}\n`)
