@@ -25738,12 +25738,14 @@ function translateCli(bin, args) {
  *   'language pack not installed for ...'      → 'language pack not installed'  ✔
  *   'unsupported language pair: xx-YY'         → 'unsupported language pair'  ✔
  *
- * COUPLING NOTE: 'unsupported language pair' is a string owned by THIS codebase —
- * it comes from TranslationEngineError.unsupportedPair's Swift `description`, not from
- * Apple. If that description string ever changes in TranslationEngine.swift, this match
- * silently stops firing and the locale gets retried instead of being marked fatal.
- * When editing TranslationEngineError.unsupportedPair's description in Swift, update
- * this substring to match.
+ * COUPLING NOTE — two matches are owned by THIS codebase, not by Apple:
+ *   'unsupported language pair' → TranslationEngineError.unsupportedPair.description (TranslationEngine.swift)
+ *   'requires macos 26'         → TranslationEngineError.requiresmacOS26.description  (TranslationEngine.swift)
+ * If either Swift description string changes, the corresponding match here silently stops
+ * firing: 'unsupported language pair' would be retried instead of marked fatal; 'requires
+ * macos 26' would fall through to a retry rather than immediately failing. Always update
+ * both files together. The other matches ('language pack not installed', 'eacces', etc.)
+ * come from Apple / the OS and are NOT under our control.
  *   permission/sandbox errors                  → 'eacces' / 'not authorized'  ✔
  *
  * macOS 26.0–26.3 caveat: on those OS versions, TranslationEngine skips the
@@ -25982,6 +25984,26 @@ async function run() {
         if (languagesFailed.length > 0) {
             core.warning(`[translate] Languages failed: ${languagesFailed.join(', ')}`);
         }
+        // Output contract — read this before using these values in workflow steps:
+        //
+        // keys_translated:
+        //   xcstrings/strings: count of source keys translated (0 = nothing changed, safe to skip commit).
+        //   markdown:          1 if ≥1 locale completed, 0 if ALL locales failed.
+        //                      It is NOT a key count. Do NOT gate a commit on `keys_translated > 0`
+        //                      in markdown mode — gate on `languages_completed != ''` instead.
+        //
+        // languages_completed:
+        //   Comma-separated locales that produced output this run.
+        //   In markdown mode this is the ONLY reliable success signal.
+        //   NOTE: a locale appearing here means the CLI exited without throwing for that locale.
+        //   It does NOT guarantee every paragraph was translated — the Apple framework may
+        //   silently drop individual paragraphs (nil clientIdentifier response). When that
+        //   happens the original paragraph is kept in the output and the locale still appears
+        //   as completed. This is a known Apple framework behaviour, not a bug in the action.
+        //
+        // languages_failed:
+        //   Comma-separated locales that threw a fatal or retriable error.
+        //   Empty string (not absent) when no locales failed.
         core.setOutput('keys_translated', String(keysTranslated));
         core.setOutput('languages_completed', languagesCompleted.join(','));
         core.setOutput('languages_failed', languagesFailed.join(','));
