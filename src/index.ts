@@ -9,8 +9,13 @@ import * as fs from 'fs'
 
 /**
  * Calls translate-cli-bin via spawnSync with an explicit argv array.
- * spawnSync is used instead of execSync — args pass directly to the OS,
- * no shell metacharacter risk from user-supplied language codes or paths.
+ *
+ * spawnSync is used instead of execSync deliberately:
+ * - Args pass directly to the OS — no shell metacharacter expansion.
+ * - User-supplied values (language codes, file paths) cannot escape as shell
+ *   injection via spaces, semicolons, backticks, $(), etc.
+ * - The binary name is hardcoded to `translate-cli-bin` (not `translate-cli`)
+ *   to avoid future name collision with a source directory of the same name.
  */
 function translateCli(bin: string, args: string[]): { stdout: string; stderr: string } {
   if (core.isDebug()) {
@@ -19,7 +24,7 @@ function translateCli(bin: string, args: string[]): { stdout: string; stderr: st
 
   const result = spawnSync(bin, args, {
     encoding: 'utf8',
-    timeout: 300_000, // 5 min — large xcstrings files can take time
+    timeout: 300_000, // 5 min — large xcstrings files with many locales can take time
     maxBuffer: 10 * 1024 * 1024,
   })
 
@@ -32,8 +37,15 @@ function translateCli(bin: string, args: string[]): { stdout: string; stderr: st
 }
 
 /**
- * Returns true if the error is fatal and a retry won't help.
- * Language pack not installed, unsupported pair, macOS version errors.
+ * Returns true if the error is fatal and a retry will not help.
+ *
+ * Fatal conditions (no point retrying):
+ * - Language pack not installed — user must download via System Settings
+ * - Unsupported language pair — Apple Translation does not support this pair at all
+ * - macOS version too old — runner needs upgrading, not retrying
+ * - Permission / MDM policy denied — infrastructure issue, not transient
+ *
+ * Non-fatal (retry may help): model cold-start, temporary framework crash, I/O blip.
  */
 function isFatalTranslateError(e: unknown): boolean {
   const msg = String(e).toLowerCase()
@@ -49,11 +61,19 @@ function isFatalTranslateError(e: unknown): boolean {
 }
 
 /**
- * Parses translate-cli stdout for key=value output lines.
- * translate-cli emits:
+ * Parses translate-cli stdout for `key=value` output lines.
+ *
+ * translate-cli emits exactly three lines to stdout (and nothing else):
  *   keys_translated=42
  *   languages_completed=de,fr,ja
  *   languages_failed=zh-Hans
+ *
+ * Parsing is done here rather than in the shell step so the action can set
+ * typed `core.setOutput()` values and emit structured step-summary content
+ * without a jq dependency on the runner.
+ *
+ * `val.split('=')` with `rest.join('=')` handles the (unlikely) case where
+ * a value itself contains `=` characters.
  */
 function parseOutput(stdout: string): {
   keysTranslated: number
@@ -94,9 +114,14 @@ async function run(): Promise<void> {
 
     const actionPath = process.env.GITHUB_ACTION_PATH ?? path.join(__dirname, '..')
 
-    // Binary is committed as translate-cli-bin — same vendoring pattern as
-    // afm-cli-bin in afm-release-notes-action. Do NOT rename to translate-cli
-    // to avoid any future name collision with a source directory.
+    // Binary is committed as `translate-cli-bin` (not `translate-cli`) to avoid
+    // any future name collision with a source directory of the same name.
+    // Same vendoring pattern used by `afm-cli-bin` in afm-release-notes-action.
+    // The binary is updated manually: download the new build from runbot-hq/translate-cli
+    // releases and commit it to the repo root.
+    //
+    // This action has zero runtime dependencies: no gh, curl, or network calls happen
+    // when the action runs. Everything needed is committed to this repo.
     const translateBin = path.join(actionPath, 'translate-cli-bin')
 
     if (!fs.existsSync(translateBin)) {
@@ -107,6 +132,8 @@ async function run(): Promise<void> {
       )
     }
 
+    // Check executable bit explicitly: a missing `+x` bit is a common post-checkout
+    // state on some runners and produces a confusing EACCES error otherwise.
     try {
       fs.accessSync(translateBin, fs.constants.X_OK)
     } catch {
@@ -125,11 +152,12 @@ async function run(): Promise<void> {
     const quality = core.getInput('quality').trim() || 'high'
     const format = core.getInput('format').trim() || 'xcstrings'
 
-    // Runtime guards: input is required unless config provides it
     if (!input) {
       throw new Error('Input `input` is required (path to source .xcstrings / .strings / .md file).')
     }
 
+    // `languages` and `config` are mutually exclusive alternatives — at least one is required.
+    // `languages` takes precedence if both are provided (handled in translate-cli itself).
     if (!languages && !config) {
       throw new Error('Either `languages` or `config` must be provided.')
     }
@@ -138,19 +166,21 @@ async function run(): Promise<void> {
       throw new Error(`Input file not found: ${input}`)
     }
 
-    // Validate quality
+    // Validate quality — guard here so the error message is clear rather than surfacing
+    // as a cryptic translate-cli exit code.
     if (quality !== 'fast' && quality !== 'high') {
       throw new Error(`Invalid quality value: "${quality}". Must be "fast" or "high".`)
     }
 
-    // Validate format
+    // Validate format — same rationale as quality validation above.
     if (!['xcstrings', 'strings', 'markdown'].includes(format)) {
       throw new Error(`Invalid format value: "${format}". Must be "xcstrings", "strings", or "markdown".`)
     }
 
-    // Resolve output:
-    // - xcstrings/markdown: output is a file path; default to same as input (in-place update)
-    // - strings: output is a directory; default to dirname(input)
+    // Resolve output path.
+    // - xcstrings / markdown: output is a file path; default = same as input (in-place update)
+    // - strings: output is a directory; lproj subdirs are created by translate-cli;
+    //   default = dirname(input)
     const resolvedOutput = output ||
       (format === 'strings'
         ? path.dirname(input)
@@ -177,7 +207,10 @@ async function run(): Promise<void> {
     core.info(`[translate] Running translate-cli for languages: ${languages || config || '(from config)'}`)
     core.info(`[translate] Input: ${input} → Output: ${resolvedOutput}`)
 
-    // Call translate-cli — one retry on non-fatal errors (model cold-start)
+    // Call translate-cli with one retry on non-fatal errors.
+    // The retry handles Apple Translation model cold-start: on the first invocation after
+    // a runner boot, the framework occasionally needs a few seconds to initialise and
+    // returns a transient error. A 10-second delay before retry is enough in practice.
     let stdout = ''
     try {
       const r = translateCli(translateBin, args)
@@ -185,7 +218,7 @@ async function run(): Promise<void> {
       if (r.stderr) core.debug(`[translate] stderr: ${r.stderr}`)
     } catch (e) {
       core.debug(`[translate] Attempt 1 error: ${String(e)}`)
-      if (isFatalTranslateError(e)) throw e
+      if (isFatalTranslateError(e)) throw e  // don't retry fatal errors
       core.info('[translate] Attempt 1 failed — retrying in 10s...')
       await new Promise(r => setTimeout(r, 10_000))
       try {
@@ -200,10 +233,12 @@ async function run(): Promise<void> {
     }
 
     if (!stdout.trim()) {
+      // Empty stdout is unexpected but not necessarily fatal — translate-cli always emits
+      // the three key=value lines even when keys_translated=0. Warn rather than throw
+      // so callers can inspect runner logs.
       core.warning('[translate] translate-cli produced no output — translation may have found nothing to translate')
     }
 
-    // Parse output
     const { keysTranslated, languagesCompleted, languagesFailed } = parseOutput(stdout)
 
     core.info(`[translate] Keys translated: ${keysTranslated}`)
@@ -212,12 +247,10 @@ async function run(): Promise<void> {
       core.warning(`[translate] Languages failed: ${languagesFailed.join(', ')}`)
     }
 
-    // Set outputs
     core.setOutput('keys_translated', String(keysTranslated))
     core.setOutput('languages_completed', languagesCompleted.join(','))
     core.setOutput('languages_failed', languagesFailed.join(','))
 
-    // Step summary
     await core.summary
       .addHeading('🌐 Translation Complete')
       .addRaw(`**Input:** \`${input}\`\n`)
@@ -229,7 +262,10 @@ async function run(): Promise<void> {
       .addRaw(`**Runner:** ${process.env.RUNNER_NAME ?? 'unknown'}\n`)
       .write()
 
-    // Fail the step if ANY language failed and none completed
+    // Fail the step only when ALL languages failed and none succeeded.
+    // Partial failures (some locales failed, others completed) are surfaced via
+    // `languages_failed` output and a warning — not a hard step failure — so the
+    // caller can decide whether to commit partial results or retry.
     if (languagesFailed.length > 0 && languagesCompleted.length === 0) {
       core.setFailed(`All languages failed: ${languagesFailed.join(', ')}`)
     }
