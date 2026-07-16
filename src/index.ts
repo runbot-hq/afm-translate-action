@@ -375,10 +375,11 @@ async function run(): Promise<void> {
       .addRaw(`**Input:** \`${input}\`\n`)
       .addRaw(`**Languages:** ${languages || '(from config)'}\n`)
       .addRaw(`**Quality:** ${quality}\n`)
-      // In markdown mode keys_translated is 0 or 1 (the document is one unit, not a key count).
-      // Label it differently so callers reading the summary aren't confused by "Keys translated: 1"
-      // on a multi-locale markdown run.
-      .addRaw(`**Keys translated:** ${keysTranslated}${format === 'markdown' ? ' (document)' : ''}\n`)
+      // keys_translated is a pre-flight diff count — it is non-zero even when all locales failed
+      // and nothing was written. Label it "Keys pending" on a total-failure run so the summary
+      // doesn't show "Keys translated: 42" alongside "Completed: (none)", which is misleading.
+      // In markdown mode it is 0 or 1 (the document is one unit); label it "(document)" there.
+      .addRaw(`**${languagesCompleted.length === 0 ? 'Keys pending' : 'Keys translated'}:** ${keysTranslated}${format === 'markdown' ? ' (document)' : ''}\n`)
       .addRaw(`**Completed:** ${languagesCompleted.join(', ') || '(none)'}\n`)
       .addRaw(languagesFailed.length > 0 ? `**Failed:** ${languagesFailed.join(', ')}\n` : '')
       .addRaw(`**Runner:** ${process.env.RUNNER_NAME ?? 'unknown'}\n`)
