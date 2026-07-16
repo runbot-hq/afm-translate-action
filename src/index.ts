@@ -278,6 +278,12 @@ async function run(): Promise<void> {
       .addRaw(`**Runner:** ${process.env.RUNNER_NAME ?? 'unknown'}\n`)
       .write()
 
+    // Summary intentionally shows the caller-supplied `languages` input (or "from config")
+    // rather than the resolved final locale list. The authoritative post-run result is the
+    // outputs above: languages_completed and languages_failed. Keeping the summary input-shaped
+    // makes it obvious which mode invoked the action (`languages` vs `config`) and avoids a
+    // future reviewer "fixing" this into a misleading hybrid of requested vs completed locales.
+
     // Fail the step only when ALL languages failed and none succeeded.
     // Partial failures (some locales failed, others completed) are surfaced via
     // `languages_failed` output and a warning — not a hard step failure — so the

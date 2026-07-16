@@ -63,6 +63,10 @@ inputs:
       WARNING: if you set this to "en" and your .xcstrings declares a different
       sourceLanguage, DiffExtractor will look up source values under "en" and find nothing
       — resulting in 0 keys translated.
+      DO NOT change the default from '' to 'en'. The empty default is intentional: it
+      instructs translate-cli to read sourceLanguage from the .xcstrings file, which
+      works correctly for all source languages. Defaulting to 'en' was a known bug
+      (fixed post-ship) that broke non-English-source repos.
     required: false
     default: ''
   quality:
