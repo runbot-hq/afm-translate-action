@@ -4,7 +4,7 @@ description: >
   (on-device Apple Translation framework) on a self-hosted macOS runner.
   Returns keys_translated and languages_completed as outputs.
   Does not commit or push any changes — callers are responsible for
-  committing the resulting translated files.
+  committing the resulting translated files and the .translation-manifest.json.
 author: runbot-hq
 
 # Minimum permissions required for this action.
@@ -25,23 +25,36 @@ author: runbot-hq
 # when this action runs.
 #
 # dist/index.js is a build artifact produced by: npm run build (runs ncc)
-# It is NOT committed in source — built and committed automatically by
-# .github/workflows/build-artifacts.yml on push to main.
+# It IS committed to this repo so GitHub Actions loads it without a build step.
+# build-artifacts.yml rebuilds and re-commits dist/ automatically on every push.
 permissions:
   contents: read
 
 inputs:
   input:
-    description: 'Path to the source .xcstrings file (or .strings file / Markdown file) to translate'
-    required: true
+    description: 'Path to the source .xcstrings, .strings, or .md file to translate'
+    required: false
+    default: ''
   output:
-    description: 'Directory where translated files will be written'
-    required: true
+    description: |
+      Output path. For xcstrings/markdown: file path (defaults to --input, in-place update).
+      For strings: directory path (defaults to dirname(input)); lproj subdirs are created automatically.
+    required: false
+    default: ''
   languages:
-    description: 'Comma-separated list of target language codes (e.g. "de,fr,ja,zh-Hans")'
-    required: true
+    description: 'Comma-separated target language codes (e.g. "de,fr,ja,zh-Hans"). Overrides --config if provided.'
+    required: false
+    default: ''
+  config:
+    description: 'Path to localization.config.json — CLI reads targetLanguages from this file. Used when languages is not set.'
+    required: false
+    default: ''
+  manifest:
+    description: 'Path to .translation-manifest.json (defaults to dirname(input)/.translation-manifest.json). Enables incremental translation.'
+    required: false
+    default: ''
   source_language:
-    description: 'Source language code (default: en)'
+    description: 'Source language code override (default: read from .xcstrings sourceLanguage field, or en)'
     required: false
     default: 'en'
   quality:

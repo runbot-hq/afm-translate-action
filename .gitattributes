@@ -1,0 +1,7 @@
+# Prevent CRLF corruption of the vendored binary on Windows git clients
+translate-cli-bin binary
+
+# Mark generated files so they're excluded from GitHub diffs and linguist stats
+dist/index.js linguist-generated=true
+dist/sourcemap-register.js linguist-generated=true
+licenses.txt linguist-generated=true

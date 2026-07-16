@@ -25777,12 +25777,21 @@ async function run() {
             throw new Error(`translate-cli-bin at ${translateBin} is not executable. Run: chmod +x translate-cli-bin and recommit.`);
         }
         // Resolve inputs
-        const input = core.getInput('input', { required: true }).trim();
-        const output = core.getInput('output', { required: true }).trim();
-        const languages = core.getInput('languages', { required: true }).trim();
+        const input = core.getInput('input').trim();
+        const output = core.getInput('output').trim();
+        const languages = core.getInput('languages').trim();
+        const config = core.getInput('config').trim();
+        const manifest = core.getInput('manifest').trim();
         const sourceLanguage = core.getInput('source_language').trim() || 'en';
         const quality = core.getInput('quality').trim() || 'high';
         const format = core.getInput('format').trim() || 'xcstrings';
+        // Runtime guards: input is required unless config provides it
+        if (!input) {
+            throw new Error('Input `input` is required (path to source .xcstrings / .strings / .md file).');
+        }
+        if (!languages && !config) {
+            throw new Error('Either `languages` or `config` must be provided.');
+        }
         if (!fs.existsSync(input)) {
             throw new Error(`Input file not found: ${input}`);
         }
@@ -25794,16 +25803,31 @@ async function run() {
         if (!['xcstrings', 'strings', 'markdown'].includes(format)) {
             throw new Error(`Invalid format value: "${format}". Must be "xcstrings", "strings", or "markdown".`);
         }
+        // Resolve output:
+        // - xcstrings/markdown: output is a file path; default to same as input (in-place update)
+        // - strings: output is a directory; default to dirname(input)
+        const resolvedOutput = output ||
+            (format === 'strings'
+                ? path.dirname(input)
+                : input);
         const args = [
             '--input', input,
-            '--output', output,
-            '--languages', languages,
+            '--output', resolvedOutput,
             '--source-language', sourceLanguage,
             '--quality', quality,
             '--format', format,
         ];
-        core.info(`[translate] Running translate-cli for languages: ${languages}`);
-        core.info(`[translate] Input: ${input} → Output: ${output}`);
+        if (languages) {
+            args.push('--languages', languages);
+        }
+        if (config) {
+            args.push('--config', config);
+        }
+        if (manifest) {
+            args.push('--manifest', manifest);
+        }
+        core.info(`[translate] Running translate-cli for languages: ${languages || config || '(from config)'}`);
+        core.info(`[translate] Input: ${input} → Output: ${resolvedOutput}`);
         // Call translate-cli — one retry on non-fatal errors (model cold-start)
         let stdout = '';
         try {
@@ -25846,7 +25870,7 @@ async function run() {
         await core.summary
             .addHeading('🌐 Translation Complete')
             .addRaw(`**Input:** \`${input}\`\n`)
-            .addRaw(`**Languages:** ${languages}\n`)
+            .addRaw(`**Languages:** ${languages || '(from config)'}\n`)
             .addRaw(`**Quality:** ${quality}\n`)
             .addRaw(`**Keys translated:** ${keysTranslated}\n`)
             .addRaw(`**Completed:** ${languagesCompleted.join(', ') || '(none)'}\n`)
