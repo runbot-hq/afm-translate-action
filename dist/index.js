@@ -25776,6 +25776,9 @@ function parseOutput(stdout) {
         const val = rest.join('=').trim();
         switch (key?.trim()) {
             case 'keys_translated':
+                // parseInt returns NaN for malformed values; `|| 0` coerces NaN → 0.
+                // This is intentional: a malformed line is treated as zero keys rather than
+                // crashing the action. The CLI always emits a valid integer here in practice.
                 keysTranslated = parseInt(val, 10) || 0;
                 break;
             case 'languages_completed':
@@ -25886,6 +25889,13 @@ async function run() {
             args.push('--languages', languages);
         }
         if (config) {
+            // `config` is intentionally not existence-checked here (unlike `input` above).
+            // If the file is missing, translate-cli will exit non-zero with its own error message
+            // ("Error: provide --languages or --config" or a Swift throw from LocalizationConfigLoader),
+            // which surfaces through spawnSync's non-zero exit and is caught by the try/catch above.
+            // The error is less targeted than a pre-check here, but adding fs.existsSync(config)
+            // would silently break workflows where config is generated earlier in the job and only
+            // exists at runtime. This trade-off is intentional for v1.
             args.push('--config', config);
         }
         if (manifest) {
@@ -25934,6 +25944,10 @@ async function run() {
             // indicates a silent binary crash or unexpected early exit — not a legitimate no-op.
             // We fail the step explicitly here so callers don't see a spurious green run with
             // zero outputs and no indication anything went wrong.
+            // core.setFailed marks the step as failed but does NOT throw — execution continues
+            // after the call. The explicit `return` below is what stops the rest of `run()`
+            // from executing. Both are required: setFailed for the step conclusion, return to
+            // prevent setOutput / summary calls from running on bad data.
             core.setFailed('[translate] translate-cli produced no stdout — binary may have crashed silently. Check runner logs for stderr output.');
             return;
         }
