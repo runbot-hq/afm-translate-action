@@ -1,0 +1,74 @@
+name: AFM Translate
+description: >
+  Translate .xcstrings (or .strings / Markdown) files using translate-cli
+  (on-device Apple Translation framework) on a self-hosted macOS runner.
+  Returns keys_translated and languages_completed as outputs.
+  Does not commit or push any changes — callers are responsible for
+  committing the resulting translated files.
+author: runbot-hq
+
+# Minimum permissions required for this action.
+# contents: read is sufficient — this action reads source files and writes
+# translated output files but does NOT push any changes to the repository.
+# Callers must grant at least this permission in their workflow:
+#
+#   permissions:
+#     contents: read
+#
+# If the caller wants to commit the translated files, they additionally need:
+#   permissions:
+#     contents: write
+#
+# translate-cli-bin is committed to the repo root — sourced from runbot-hq/translate-cli.
+# It is updated manually: download the new binary from runbot-hq/translate-cli and
+# commit it here. Zero runtime dependencies — no gh, curl, or network calls occur
+# when this action runs.
+#
+# dist/index.js is a build artifact produced by: npm run build (runs ncc)
+# It is NOT committed in source — built and committed automatically by
+# .github/workflows/build-artifacts.yml on push to main.
+permissions:
+  contents: read
+
+inputs:
+  input:
+    description: 'Path to the source .xcstrings file (or .strings file / Markdown file) to translate'
+    required: true
+  output:
+    description: 'Directory where translated files will be written'
+    required: true
+  languages:
+    description: 'Comma-separated list of target language codes (e.g. "de,fr,ja,zh-Hans")'
+    required: true
+  source_language:
+    description: 'Source language code (default: en)'
+    required: false
+    default: 'en'
+  quality:
+    description: 'Translation quality: fast (lowLatency) or high (highFidelity, requires Apple Intelligence)'
+    required: false
+    default: 'high'
+  format:
+    description: 'Output format: xcstrings, strings, or markdown'
+    required: false
+    default: 'xcstrings'
+  debug:
+    description: 'Set to true to enable verbose logging'
+    required: false
+    default: 'false'
+
+# outputs: intentionally has no value: fields.
+# value: expressions are only valid in composite actions.
+# This is a node24 action — outputs are set via core.setOutput() in dist/index.js.
+# Do NOT add value: fields here.
+outputs:
+  keys_translated:
+    description: Number of string keys translated
+  languages_completed:
+    description: Comma-separated list of language codes that completed successfully
+  languages_failed:
+    description: Comma-separated list of language codes that failed (empty string if none)
+
+runs:
+  using: node24
+  main: dist/index.js

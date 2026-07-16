@@ -1,0 +1,19 @@
+{
+  "name": "afm-translate-action",
+  "version": "1.0.0",
+  "description": "Translate .xcstrings files using Apple Translation (on-device) on a self-hosted macOS runner",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "ncc build src/index.ts -o dist --license licenses.txt",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@actions/core": "^1.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@vercel/ncc": "^0.38.1",
+    "typescript": "^5.4.5"
+  },
+  "//": "package-lock.json is present locally for npm ci in development. Not committed — dist/index.js (ncc bundle) is the committed artifact. Run npm install then npm run build to rebuild locally."
+}

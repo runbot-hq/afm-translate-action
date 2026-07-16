@@ -1,0 +1,57 @@
+name: Build and commit artifacts
+
+# Builds dist/index.js (ncc bundle) on every push to any branch, then
+# commits it back if changed.
+#
+# translate-cli-bin is NOT built here — it is sourced from the main branch of
+# runbot-hq/translate-cli and committed directly to this repo. To update the
+# binary, fetch translate-cli-bin from runbot-hq/translate-cli@main and commit
+# it here. Binary updates are explicit, reviewable commits — not side effects
+# of every workflow run.
+#
+# Do NOT add a step that auto-fetches translate-cli-bin from translate-cli on
+# every push — that creates an implicit moving dependency and makes unrelated
+# TS/docs changes silently change the shipped binary.
+on:
+  push:
+    branches-ignore:
+      - 'dependabot/**'
+
+jobs:
+  build:
+    # Skip the bot's own artifact commit to avoid infinite loop.
+    if: github.actor != 'github-actions[bot]'
+    runs-on: macos-26
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build dist/index.js
+        run: |
+          npm install
+          npm run build
+
+      - name: Commit artifacts if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Stage translate-cli-bin + the entire dist/ directory.
+          # translate-cli-bin is staged so a manual binary update committed in
+          # the same push gets included in the bot artifact commit.
+          # Stage the entire dist/ directory — ncc emits dist/index.js AND
+          # dist/sourcemap-register.js as a required pair. Staging only
+          # dist/index.js leaves sourcemap-register.js uncommitted, causing
+          # a MODULE_NOT_FOUND crash at runtime. Do NOT revert to `git add dist/index.js`.
+          [ -f translate-cli-bin ] && git add translate-cli-bin
+          git add dist/
+          if git diff --cached --quiet; then
+            echo "Artifacts unchanged — nothing to commit."
+          else
+            git commit -m "chore: rebuild artifacts"
+            git pull --rebase origin "$GITHUB_REF_NAME"
+            git push origin "HEAD:$GITHUB_REF_NAME"
+          fi
