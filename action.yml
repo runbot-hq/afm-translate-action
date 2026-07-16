@@ -99,7 +99,10 @@ inputs:
 # will confuse reviewers into thinking the outputs are broken.
 outputs:
   keys_translated:
-    description: Number of string keys translated
+    description: >-
+      xcstrings/strings mode: number of source keys translated this run (0 = nothing changed).
+      markdown mode: 1 if at least one locale completed, 0 if all locales failed.
+      In markdown mode do NOT gate a commit on this value — gate on languages_completed instead.
   languages_completed:
     description: Comma-separated list of language codes that completed successfully
   languages_failed:
