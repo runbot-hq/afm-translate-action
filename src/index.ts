@@ -125,7 +125,10 @@ function parseOutput(stdout: string): {
 
 async function run(): Promise<void> {
   try {
-    if (core.getInput('debug') === 'true') process.env.ACTIONS_STEP_DEBUG = '1'
+    // `core.isDebug()` reads `RUNNER_DEBUG`, not `ACTIONS_STEP_DEBUG`.
+    // Setting ACTIONS_STEP_DEBUG at runtime has no effect on `core.debug()` calls
+    // in the same process — they all call `isDebug()` which checks RUNNER_DEBUG.
+    if (core.getInput('debug') === 'true') process.env.RUNNER_DEBUG = '1'
 
     const actionPath = process.env.GITHUB_ACTION_PATH ?? path.join(__dirname, '..')
 
