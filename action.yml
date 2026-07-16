@@ -54,9 +54,17 @@ inputs:
     required: false
     default: ''
   source_language:
-    description: 'Source language code override (default: read from .xcstrings sourceLanguage field, or en)'
+    description: |
+      Source language code override (e.g. "en", "fr").
+      Leave empty (default) to let translate-cli read the sourceLanguage field directly
+      from the .xcstrings file. Only set this when the .xcstrings sourceLanguage field
+      is absent or incorrect, or when translating .strings files (which have no embedded
+      source language field).
+      WARNING: if you set this to "en" and your .xcstrings declares a different
+      sourceLanguage, DiffExtractor will look up source values under "en" and find nothing
+      — resulting in 0 keys translated.
     required: false
-    default: 'en'
+    default: ''
   quality:
     description: 'Translation quality: fast (lowLatency) or high (highFidelity, requires Apple Intelligence)'
     required: false

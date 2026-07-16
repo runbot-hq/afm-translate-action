@@ -148,7 +148,16 @@ async function run(): Promise<void> {
     const languages = core.getInput('languages').trim()
     const config = core.getInput('config').trim()
     const manifest = core.getInput('manifest').trim()
-    const sourceLanguage = core.getInput('source_language').trim() || 'en'
+    // source_language intentionally defaults to '' (empty string) — not 'en'.
+    // When empty, --source-language is NOT passed to translate-cli, so the CLI
+    // reads sourceLanguage directly from the .xcstrings file. This is correct for
+    // any .xcstrings file regardless of its declared source language.
+    // Only set source_language explicitly when:
+    //   a) translating .strings files (no embedded source language)
+    //   b) the .xcstrings sourceLanguage field is wrong or absent
+    // Passing 'en' when the .xcstrings declares a different source language causes
+    // DiffExtractor to look up source values under 'en' and find nothing — 0 keys translated.
+    const sourceLanguage = core.getInput('source_language').trim()
     const quality = core.getInput('quality').trim() || 'high'
     const format = core.getInput('format').trim() || 'xcstrings'
 
@@ -189,10 +198,17 @@ async function run(): Promise<void> {
     const args: string[] = [
       '--input', input,
       '--output', resolvedOutput,
-      '--source-language', sourceLanguage,
       '--quality', quality,
       '--format', format,
     ]
+
+    // Only pass --source-language when explicitly set by the caller.
+    // When omitted, translate-cli reads sourceLanguage from the .xcstrings file directly.
+    // Passing 'en' unconditionally would silently override a non-English sourceLanguage
+    // in the .xcstrings file, causing DiffExtractor to find 0 keys to translate.
+    if (sourceLanguage) {
+      args.push('--source-language', sourceLanguage)
+    }
 
     if (languages) {
       args.push('--languages', languages)
