@@ -25733,7 +25733,7 @@ function translateCli(bin, args) {
  *
  * macOS 26.0–26.3 caveat: on those OS versions, TranslationEngine skips the
  * LanguageAvailability preflight check (API requires 26.4). If a language pack is missing,
- * Apple’s framework throws an opaque error whose message is NOT controlled by us and may
+ * Apple's framework throws an opaque error whose message is NOT controlled by us and may
  * NOT match 'language pack not installed' below. In that case isFatalTranslateError returns
  * false and the error is retried once — harmless but inefficient. If you observe spurious
  * retries on 26.0–26.3 runners for missing packs, identify the opaque error substring and
@@ -25793,8 +25793,13 @@ function parseOutput(stdout) {
 // ---------------------------------------------------------------------------
 async function run() {
     try {
-        if (core.getInput('debug') === 'true')
-            process.env.ACTIONS_STEP_DEBUG = '1';
+        // Resolve debug early — used both for core.debug() gating and --debug flag passthrough.
+        // NOTE: core.isDebug() reads RUNNER_DEBUG (set by the runner at process startup).
+        // Setting ACTIONS_STEP_DEBUG at runtime in the same process has no effect on
+        // core.isDebug() — the runner does not re-read it after startup. The debug input
+        // therefore controls CLI verbosity via --debug (passed to translate-cli-bin below),
+        // not via ACTIONS_STEP_DEBUG. Do NOT reintroduce the ACTIONS_STEP_DEBUG assignment.
+        const debugInput = core.getInput('debug') === 'true';
         const actionPath = process.env.GITHUB_ACTION_PATH ?? path.join(__dirname, '..');
         // Binary is committed as `translate-cli-bin` (not `translate-cli`) to avoid
         // any future name collision with a source directory of the same name.
@@ -25886,6 +25891,13 @@ async function run() {
         if (manifest) {
             args.push('--manifest', manifest);
         }
+        // Pass --debug to the CLI when the debug input is set.
+        // This enables verbose stderr logging in translate-cli-bin directly.
+        // Do NOT use ACTIONS_STEP_DEBUG for this — setting it at runtime has no effect
+        // on core.isDebug() because the runner reads RUNNER_DEBUG at process startup.
+        if (debugInput) {
+            args.push('--debug');
+        }
         core.info(`[translate] Running translate-cli for languages: ${languages || config || '(from config)'}`);
         core.info(`[translate] Input: ${input} → Output: ${resolvedOutput}`);
         // Call translate-cli with one retry on non-fatal errors.
@@ -25943,9 +25955,9 @@ async function run() {
         await core.summary
             .addHeading('🌐 Translation Complete')
             .addRaw(`**Input:** \`${input}\`\n`)
-            .addRaw(`**Languages:** ${languages || languagesCompleted.join(', ') || '(from config)'}\n`)
+            .addRaw(`**Languages:** ${languages || '(from config)'}\n`)
             .addRaw(`**Quality:** ${quality}\n`)
-            .addRaw(`**Keys translated:** ${keysTranslated} *(pre-flight estimate — use Completed for success)*\n`)
+            .addRaw(`**Keys translated:** ${keysTranslated}\n`)
             .addRaw(`**Completed:** ${languagesCompleted.join(', ') || '(none)'}\n`)
             .addRaw(languagesFailed.length > 0 ? `**Failed:** ${languagesFailed.join(', ')}\n` : '')
             .addRaw(`**Runner:** ${process.env.RUNNER_NAME ?? 'unknown'}\n`)
