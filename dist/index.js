@@ -25705,7 +25705,12 @@ function translateCli(bin, args) {
     }
     const result = (0, child_process_1.spawnSync)(bin, args, {
         encoding: 'utf8',
-        timeout: 300_000, // 5 min — large xcstrings files with many locales can take time
+        // 5-minute timeout per attempt. With one retry this means up to ~10 min wall time
+        // (5m attempt 1 + 10s delay + 5m attempt 2) for very large .xcstrings files.
+        // This is intentional: large repos with many locales legitimately take several minutes.
+        // Callers with large jobs should be aware of this ceiling.
+        // A timeout surfaces as result.error (ETIMEDOUT), which is non-fatal and will be retried.
+        timeout: 300_000,
         maxBuffer: 10 * 1024 * 1024,
     });
     if (result.error)
@@ -25917,6 +25922,12 @@ async function run() {
         core.setOutput('keys_translated', String(keysTranslated));
         core.setOutput('languages_completed', languagesCompleted.join(','));
         core.setOutput('languages_failed', languagesFailed.join(','));
+        // Summary uses addRaw() with caller-supplied values (`input`, `languages`).
+        // This is acceptable here because those values come from the workflow YAML in the
+        // caller's own repository — effectively trusted input controlled by the repo author,
+        // not untrusted external user content. Escaping would be nice hygiene but this is
+        // NOT a security boundary and should not be treated as XSS in the product sense.
+        // If we ever expose these fields to PR/comment/user-provided content, revisit this.
         await core.summary
             .addHeading('🌐 Translation Complete')
             .addRaw(`**Input:** \`${input}\`\n`)
@@ -25932,10 +25943,20 @@ async function run() {
         // outputs above: languages_completed and languages_failed. Keeping the summary input-shaped
         // makes it obvious which mode invoked the action (`languages` vs `config`) and avoids a
         // future reviewer "fixing" this into a misleading hybrid of requested vs completed locales.
-        // Fail the step only when ALL languages failed and none succeeded.
-        // Partial failures (some locales failed, others completed) are surfaced via
-        // `languages_failed` output and a warning — not a hard step failure — so the
-        // caller can decide whether to commit partial results or retry.
+        // Step failure policy: fail hard only when EVERY language failed (nothing was written).
+        //
+        // Partial failure (some locales failed, others completed) is intentionally NOT a step
+        // failure. Reasons:
+        //   1. The completed locales produced real output that the caller may want to commit.
+        //   2. The failed locales will be re-queued on the next run via the manifest diff.
+        //   3. A hard failure on partial success would discard completed work and require
+        //      the caller to re-translate everything from scratch.
+        //
+        // Partial failure is surfaced via:  core.warning() + languages_failed output.
+        // Callers that want strict all-or-nothing behaviour can check
+        // `languages_failed != ''` themselves and fail their own step.
+        //
+        // Do NOT change this to `languagesFailed.length > 0` without understanding the above.
         if (languagesFailed.length > 0 && languagesCompleted.length === 0) {
             core.setFailed(`All languages failed: ${languagesFailed.join(', ')}`);
         }
