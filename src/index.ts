@@ -58,6 +58,13 @@ function translateCli(bin: string, args: string[]): { stdout: string; stderr: st
  *   'translation framework requires macos 26+' → 'requires macos 26'  ✔
  *   'language pack not installed for ...'      → 'language pack not installed'  ✔
  *   'unsupported language pair: xx-YY'         → 'unsupported language pair'  ✔
+ *
+ * COUPLING NOTE: 'unsupported language pair' is a string owned by THIS codebase —
+ * it comes from TranslationEngineError.unsupportedPair's Swift `description`, not from
+ * Apple. If that description string ever changes in TranslationEngine.swift, this match
+ * silently stops firing and the locale gets retried instead of being marked fatal.
+ * When editing TranslationEngineError.unsupportedPair's description in Swift, update
+ * this substring to match.
  *   permission/sandbox errors                  → 'eacces' / 'not authorized'  ✔
  *
  * macOS 26.0–26.3 caveat: on those OS versions, TranslationEngine skips the
