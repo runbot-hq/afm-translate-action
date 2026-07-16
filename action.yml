@@ -30,6 +30,12 @@ author: runbot-hq
 permissions:
   contents: read
 
+# All inputs are `required: false` even though several are logically required at runtime.
+# GitHub Actions validates `required: true` inputs at workflow-parse time and blocks the
+# run with an unhelpful generic error when they are absent. By marking all inputs as
+# `required: false` and performing validation in index.ts, we surface clear, actionable
+# error messages (e.g. "Input `input` is required") rather than a cryptic framework error.
+# Do NOT change any of these to `required: true`.
 inputs:
   input:
     description: 'Path to the source .xcstrings, .strings, or .md file to translate'
@@ -82,10 +88,13 @@ inputs:
     required: false
     default: 'false'
 
-# outputs: intentionally has no value: fields.
-# value: expressions are only valid in composite actions.
-# This is a node24 action — outputs are set via core.setOutput() in dist/index.js.
-# Do NOT add value: fields here.
+# outputs: intentionally has NO `value:` fields.
+# `value:` expressions (e.g. `value: ${{ steps.x.outputs.y }}`) are only valid in
+# COMPOSITE actions. This is a NODE action (using: node24).
+# In a node action, outputs are set programmatically via `core.setOutput()` in
+# dist/index.js at runtime — there is nothing to declare statically here.
+# Do NOT add `value:` fields. They will be silently ignored by the runner and
+# will confuse reviewers into thinking the outputs are broken.
 outputs:
   keys_translated:
     description: Number of string keys translated

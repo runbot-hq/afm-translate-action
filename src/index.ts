@@ -295,9 +295,9 @@ async function run(): Promise<void> {
     await core.summary
       .addHeading('🌐 Translation Complete')
       .addRaw(`**Input:** \`${input}\`\n`)
-      .addRaw(`**Languages:** ${languages || '(from config)'}\n`)
+      .addRaw(`**Languages:** ${languages || languagesCompleted.join(', ') || '(from config)'}\n`)
       .addRaw(`**Quality:** ${quality}\n`)
-      .addRaw(`**Keys translated:** ${keysTranslated}\n`)
+      .addRaw(`**Keys translated:** ${keysTranslated} *(pre-flight estimate — use Completed for success)*\n`)
       .addRaw(`**Completed:** ${languagesCompleted.join(', ') || '(none)'}\n`)
       .addRaw(languagesFailed.length > 0 ? `**Failed:** ${languagesFailed.join(', ')}\n` : '')
       .addRaw(`**Runner:** ${process.env.RUNNER_NAME ?? 'unknown'}\n`)
