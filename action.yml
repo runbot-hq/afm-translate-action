@@ -100,9 +100,11 @@ inputs:
 outputs:
   keys_translated:
     description: >-
-      xcstrings/strings mode: number of source keys translated this run (0 = nothing changed).
-      markdown mode: 1 if at least one locale completed, 0 if all locales failed.
-      In markdown mode do NOT gate a commit on this value — gate on languages_completed instead.
+      xcstrings/strings mode: pre-flight diff count — the number of source keys that changed
+      since the last run. NON-ZERO EVEN IF ALL LOCALES FAILED AND NOTHING WAS WRITTEN.
+      Do NOT gate a commit step on this value in any format — gate on languages_completed != ''
+      instead. Use keys_translated only for informational logging (e.g. commit message body).
+      markdown mode: 1 if at least one locale completed, 0 if all locales failed (not a key count).
   languages_completed:
     description: Comma-separated list of language codes that completed successfully
   languages_failed:
