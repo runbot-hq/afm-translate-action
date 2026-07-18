@@ -45,12 +45,15 @@ import * as os from 'os'
  *
  * Partial-file and zero-byte cleanup: if curl fails after writing partial
  * bytes, the try/catch calls fs.unlinkSync(dest) before re-throwing. After a
- * successful curl exit, a size check guards against the narrow window where
- * curl exits 0 with a zero-byte output (e.g. CDN returns 200 with empty body
- * before --fail triggers). A zero-byte file passes existsSync + chmodSync +
- * accessSync(X_OK) but causes ENOEXEC at spawnSync. The size check throws and
- * unlinks before that can happen.
- * Do NOT remove either the try/catch cleanup or the size check.
+ * successful curl exit, statSync guards against two bad-file-state scenarios:
+ *   1. curl exits 0 but never creates the file (e.g. RUNNER_TEMP is read-only
+ *      or non-existent on a misconfigured self-hosted runner) — statSync throws
+ *      ENOENT, caught and re-thrown with a clear message.
+ *   2. curl exits 0 with a zero-byte file (CDN returns 200 with empty body
+ *      before --fail triggers) — caught by the size === 0 check.
+ * Both cases clean up and throw before chmodSync, so a bad file never reaches
+ * accessSync(X_OK) or spawnSync.
+ * Do NOT remove either the try/catch cleanup or the statSync guard.
  */
 function downloadTranslateCli(dest: string): void {
   core.info('[translate] Downloading translate-cli-bin from runbot-hq/translate-cli latest release...')
@@ -74,13 +77,30 @@ function downloadTranslateCli(dest: string): void {
     throw e
   }
 
-  // Guard against zero-byte output. curl can exit 0 with an empty file in the
-  // narrow window where the CDN returns HTTP 200 but delivers an empty body
-  // before --fail triggers. A zero-byte file passes chmodSync and accessSync
-  // (X_OK) but causes ENOEXEC (or equivalent) at spawnSync, producing a
-  // confusing error. Catch it here and fail loudly with a clear message.
-  // Do NOT remove this check.
-  const stat = fs.statSync(dest)
+  // Guard against missing or zero-byte output.
+  //
+  // statSync is wrapped in try/catch because curl can exit 0 without creating
+  // the file at all — e.g. if RUNNER_TEMP is read-only or non-existent on a
+  // misconfigured self-hosted runner. In that case a bare statSync throws a raw
+  // ENOENT with no cleanup and no useful context. We catch it, clean up, and
+  // re-throw with a clear message.
+  //
+  // If the file exists but is zero bytes (CDN returned HTTP 200 with empty body
+  // before --fail triggered), the size === 0 branch cleans up and throws.
+  //
+  // A zero-byte or missing file would pass chmodSync and accessSync(X_OK) but
+  // cause ENOEXEC (or equivalent) at spawnSync. Catch both cases here.
+  // Do NOT remove this guard.
+  let stat: fs.Stats
+  try {
+    stat = fs.statSync(dest)
+  } catch {
+    try { fs.unlinkSync(dest) } catch { /* ignore */ }
+    throw new Error(
+      `translate-cli-bin was not written to ${dest} — curl exited 0 but the file does not exist. ` +
+      'RUNNER_TEMP may be read-only or non-existent on this runner.'
+    )
+  }
   if (stat.size === 0) {
     try { fs.unlinkSync(dest) } catch { /* ignore */ }
     throw new Error('curl downloaded a zero-byte translate-cli-bin — the release asset may be missing or the CDN returned an empty response')
@@ -393,18 +413,6 @@ async function run(): Promise<void> {
     }
 
     if (!stdout.trim()) {
-      // Empty stdout means translate-cli exited 0 but produced no output at all.
-      // This should never happen: translate-cli always emits the three key=value lines
-      // even when keys_translated=0 (genuine nothing-to-do). An empty stdout therefore
-      // indicates a silent binary crash or unexpected early exit — not a legitimate no-op.
-      // We fail the step explicitly here so callers don't see a spurious green run with
-      // zero outputs and no indication anything went wrong.
-      // Two-line pattern: setFailed + return. Both lines are required — neither alone is enough.
-      //   core.setFailed() marks the step conclusion as failed but does NOT throw or stop
-      //   execution — code continues running after the call. Without the `return`, the
-      //   setOutput / summary / setFailed-on-all-failed block below would all execute on
-      //   bad (empty) parsed data, producing misleading step outputs.
-      //   The explicit `return` is what actually halts run(). Do not remove either line.
       core.setFailed('[translate] translate-cli produced no stdout — binary may have crashed silently. Check runner logs for stderr output.')
       return
     }
@@ -417,68 +425,21 @@ async function run(): Promise<void> {
       core.warning(`[translate] Languages failed: ${languagesFailed.join(', ')}`)
     }
 
-    // Output contract — read this before using these values in workflow steps:
-    //
-    // keys_translated:
-    //   xcstrings/strings: count of source keys translated (0 = nothing changed, safe to skip commit).
-    //   markdown:          1 if ≥1 locale completed, 0 if ALL locales failed.
-    //                      It is NOT a key count. Do NOT gate a commit on `keys_translated > 0`
-    //                      in markdown mode — gate on `languages_completed != ''` instead.
-    //
-    // languages_completed:
-    //   Comma-separated locales that produced output this run.
-    //   In markdown mode this is the ONLY reliable success signal.
-    //   NOTE: a locale appearing here means the CLI exited without throwing for that locale.
-    //   It does NOT guarantee every paragraph was translated — the Apple framework may
-    //   silently drop individual paragraphs (nil clientIdentifier response). When that
-    //   happens the original paragraph is kept in the output and the locale still appears
-    //   as completed. This is a known Apple framework behaviour, not a bug in the action.
-    //
-    // languages_failed:
-    //   Comma-separated locales that threw a fatal or retriable error.
-    //   Empty string (not absent) when no locales failed.
     core.setOutput('keys_translated', String(keysTranslated))
     core.setOutput('languages_completed', languagesCompleted.join(','))
     core.setOutput('languages_failed', languagesFailed.join(','))
 
-    // addRaw() with `input`, `languages`, `quality` — not an XSS/injection risk here.
-    // These values originate from the workflow YAML in the caller's own repository
-    // (the repo author controls them), not from untrusted external content such as
-    // PR titles, issue bodies, or user comments. The GitHub Actions step summary is
-    // rendered only in the Actions UI for authenticated repo members — it is not
-    // a public-facing surface. addEscaped() would be cleaner hygiene but this is
-    // explicitly NOT a security boundary. If these fields are ever populated from
-    // PR/issue/comment content (e.g. a language code extracted from a PR body),
-    // switch to addEscaped() or sanitise before this call.
     await core.summary
       .addHeading('🌐 Translation Complete')
       .addRaw(`**Input:** \`${input}\`\n`)
       .addRaw(`**Languages:** ${languages || '(from config)'}\n`)
       .addRaw(`**Quality:** ${quality}\n`)
-      // keys_translated is a pre-flight diff count — it is non-zero even when all locales failed
-      // and nothing was written. Label it "Keys pending" on a total-failure run so the summary
-      // doesn't show "Keys translated: 42" alongside "Completed: (none)", which is misleading.
-      // In markdown mode it is 0 or 1 (the document is one unit); label it "(document)" there.
       .addRaw(`**${languagesCompleted.length === 0 ? 'Keys pending' : 'Keys translated'}:** ${keysTranslated}${format === 'markdown' ? ' (document)' : ''}\n`)
       .addRaw(`**Completed:** ${languagesCompleted.join(', ') || '(none)'}\n`)
       .addRaw(languagesFailed.length > 0 ? `**Failed:** ${languagesFailed.join(', ')}\n` : '')
       .addRaw(`**Runner:** ${process.env.RUNNER_NAME ?? 'unknown'}\n`)
       .write()
 
-    // Step failure policy: fail hard only when EVERY language failed (nothing was written).
-    //
-    // Partial failure (some locales failed, others completed) is intentionally NOT a step
-    // failure. Reasons:
-    //   1. The completed locales produced real output that the caller may want to commit.
-    //   2. The failed locales will be re-queued on the next run via the manifest diff.
-    //   3. A hard failure on partial success would discard completed work and require
-    //      the caller to re-translate everything from scratch.
-    //
-    // Partial failure is surfaced via:  core.warning() + languages_failed output.
-    // Callers that want strict all-or-nothing behaviour can check
-    // `languages_failed != ''` themselves and fail their own step.
-    //
-    // Do NOT change this to `languagesFailed.length > 0` without understanding the above.
     if (languagesFailed.length > 0 && languagesCompleted.length === 0) {
       core.setFailed(`All languages failed: ${languagesFailed.join(', ')}`)
     }
