@@ -1,11 +1,94 @@
 import * as core from '@actions/core'
-import { spawnSync } from 'child_process'
+import { spawnSync, execFileSync } from 'child_process'
 import * as path from 'path'
 import * as fs from 'fs'
+import * as os from 'os'
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Downloads translate-cli-bin from runbot-hq/translate-cli latest release into RUNNER_TEMP
+ * using curl (universally available on macOS — no extra runner dependencies).
+ *
+ * execFileSync is used deliberately — args are a plain array passed directly
+ * to the OS, no shell involved, no injection risk from the URL constant.
+ * Do NOT refactor to execSync with a shell string.
+ *
+ * The binary is written to RUNNER_TEMP (not the workspace) so it is:
+ *   - Cleaned up automatically after the job (on GitHub-hosted runners)
+ *   - Not committed or staged into the caller's repo checkout
+ *   - Shared across steps in the same job if needed
+ * RUNNER_TEMP is per-job on GitHub-hosted runners and is cleaned up
+ * automatically after the job completes. On self-hosted runners RUNNER_TEMP
+ * persistence is operator-controlled — it is NOT guaranteed to be cleaned
+ * between jobs unless the runner is configured with --ephemeral or the
+ * operator explicitly cleans it. On a persistent self-hosted RUNNER_TEMP, a
+ * stale binary from a prior job run will be silently reused by the
+ * fs.existsSync skip-download guard in run(). This is acceptable given the
+ * same-org trust boundary, but callers on self-hosted runners should be
+ * aware that "latest" is not re-fetched unless RUNNER_TEMP is cleaned.
+ *
+ * releases/latest tradeoff: the URL resolves to whatever is currently the
+ * latest release at runbot-hq/translate-cli — no SHA pinning, no checksum
+ * verification. This is a conscious architectural tradeoff accepted because:
+ *   - runbot-hq controls both this repo and translate-cli (same org, same trust boundary)
+ *   - curl --fail will catch 404 / HTTP errors and exit non-zero
+ *   - The self-hosted runner has no internet exposure beyond GitHub
+ *
+ * --retry 3 --retry-delay 2: retries up to 3 times on transient network errors
+ * (TCP reset, CDN hiccup on the GitHub releases redirect chain). curl --fail
+ * still exits non-zero on HTTP 4xx/5xx — --retry does not retry those.
+ * If all retries fail, execFileSync throws and the partial file (if any) is
+ * cleaned up before propagating the error (see try/catch below).
+ *
+ * Partial-file and zero-byte cleanup: if curl fails after writing partial
+ * bytes, the try/catch calls fs.unlinkSync(dest) before re-throwing. After a
+ * successful curl exit, a size check guards against the narrow window where
+ * curl exits 0 with a zero-byte output (e.g. CDN returns 200 with empty body
+ * before --fail triggers). A zero-byte file passes existsSync + chmodSync +
+ * accessSync(X_OK) but causes ENOEXEC at spawnSync. The size check throws and
+ * unlinks before that can happen.
+ * Do NOT remove either the try/catch cleanup or the size check.
+ */
+function downloadTranslateCli(dest: string): void {
+  core.info('[translate] Downloading translate-cli-bin from runbot-hq/translate-cli latest release...')
+  try {
+    execFileSync('curl', [
+      '--fail',
+      '--silent',
+      '--show-error',
+      '--location',
+      '--retry', '3',
+      '--retry-delay', '2',
+      'https://github.com/runbot-hq/translate-cli/releases/latest/download/translate-cli-bin',
+      '--output', dest,
+    ])
+  } catch (e) {
+    // Clean up any partial file curl may have written before throwing.
+    // Without this, a re-run of the same job step finds fs.existsSync(dest)
+    // true, skips the download, then fails at fs.accessSync(X_OK) with a
+    // confusing error instead of retrying.
+    try { fs.unlinkSync(dest) } catch { /* ignore — file may not exist */ }
+    throw e
+  }
+
+  // Guard against zero-byte output. curl can exit 0 with an empty file in the
+  // narrow window where the CDN returns HTTP 200 but delivers an empty body
+  // before --fail triggers. A zero-byte file passes chmodSync and accessSync
+  // (X_OK) but causes ENOEXEC (or equivalent) at spawnSync, producing a
+  // confusing error. Catch it here and fail loudly with a clear message.
+  // Do NOT remove this check.
+  const stat = fs.statSync(dest)
+  if (stat.size === 0) {
+    try { fs.unlinkSync(dest) } catch { /* ignore */ }
+    throw new Error('curl downloaded a zero-byte translate-cli-bin — the release asset may be missing or the CDN returned an empty response')
+  }
+
+  fs.chmodSync(dest, 0o755)
+  core.info(`[translate] Downloaded translate-cli-bin to ${dest}`)
+}
 
 /**
  * Calls translate-cli-bin via spawnSync with an explicit argv array.
@@ -157,33 +240,30 @@ async function run(): Promise<void> {
     // not via ACTIONS_STEP_DEBUG. Do NOT reintroduce the ACTIONS_STEP_DEBUG assignment.
     const debugInput = core.getInput('debug') === 'true'
 
-    const actionPath = process.env.GITHUB_ACTION_PATH ?? path.join(__dirname, '..')
+    // translate-cli-bin is downloaded at runtime from runbot-hq/translate-cli latest release
+    // via curl into RUNNER_TEMP. curl ships with macOS as part of the OS —
+    // no extra runner dependencies. RUNNER_TEMP is cleaned up after the job on
+    // GitHub-hosted runners. See downloadTranslateCli() JSDoc for the full RUNNER_TEMP
+    // persistence caveat on self-hosted runners and the releases/latest tradeoff.
+    const translateBin = path.join(process.env.RUNNER_TEMP ?? os.tmpdir(), 'translate-cli-bin')
 
-    // Binary is committed as `translate-cli-bin` (not `translate-cli`) to avoid
-    // any future name collision with a source directory of the same name.
-    // Same vendoring pattern used by `afm-cli-bin` in afm-release-notes-action.
-    // The binary is updated manually: download the new build from runbot-hq/translate-cli
-    // releases and commit it to the repo root.
-    //
-    // This action has zero runtime dependencies: no gh, curl, or network calls happen
-    // when the action runs. Everything needed is committed to this repo.
-    const translateBin = path.join(actionPath, 'translate-cli-bin')
-
+    // Skip download if binary is already present in RUNNER_TEMP. On GitHub-hosted
+    // runners RUNNER_TEMP is per-job so this only fires for multi-step sharing
+    // within the same job. On self-hosted runners with a persistent RUNNER_TEMP,
+    // this may reuse a binary from a prior job run — see downloadTranslateCli() JSDoc.
     if (!fs.existsSync(translateBin)) {
-      throw new Error(
-        `translate-cli-bin binary not found at ${translateBin}. ` +
-        'This action requires a self-hosted macOS 26+ arm64 runner with Apple Translation enabled. ' +
-        'It cannot run on GitHub-hosted Linux or Windows runners.'
-      )
+      downloadTranslateCli(translateBin)
+    } else {
+      core.info(`[translate] translate-cli-bin already present at ${translateBin}, skipping download`)
     }
 
-    // Check executable bit explicitly: a missing `+x` bit is a common post-checkout
-    // state on some runners and produces a confusing EACCES error otherwise.
+    // Check executable bit explicitly: a missing `+x` bit after download is unexpected
+    // (downloadTranslateCli calls chmodSync) but worth a clear error rather than EACCES.
     try {
       fs.accessSync(translateBin, fs.constants.X_OK)
     } catch {
       throw new Error(
-        `translate-cli-bin at ${translateBin} is not executable. Run: chmod +x translate-cli-bin and recommit.`
+        `translate-cli-bin at ${translateBin} is not executable. This is unexpected after download — please file a bug.`
       )
     }
 
