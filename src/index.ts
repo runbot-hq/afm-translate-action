@@ -43,10 +43,12 @@ import * as os from 'os'
  * If all retries fail, execFileSync throws and the partial file (if any) is
  * cleaned up before propagating the error (see try/catch below).
  *
- * --write-out "\nHTTP %{http_code}": prints the HTTP status code to stderr
- * even when --silent suppresses the response body. On a 404 (no release asset
- * published yet), this surfaces "HTTP 404" alongside the curl exit-code error,
- * making first-setup failures immediately actionable without re-running with -v.
+ * --show-error: restores curl's error message to stderr even with --silent.
+ * On a 404 (no release asset published yet) this surfaces the HTTP error
+ * reason in the Actions log without needing to re-run with -v.
+ * Do NOT add --write-out for HTTP status: --write-out defaults to stdout,
+ * which execFileSync captures and discards (return value is ignored here),
+ * so the status line would be silently swallowed — the opposite of the intent.
  *
  * Partial-file and zero-byte cleanup: if curl fails after writing partial
  * bytes, the try/catch calls fs.unlinkSync(dest) before re-throwing. After a
@@ -70,10 +72,6 @@ function downloadTranslateCli(dest: string): void {
       '--location',
       '--retry', '3',
       '--retry-delay', '2',
-      // --write-out prints the HTTP status code to stderr on failure.
-      // With --silent + --fail alone, a 404 surfaces only as "exited with code 22".
-      // This makes first-setup failures (no release asset yet) immediately actionable.
-      '--write-out', '\nHTTP %{http_code}',
       'https://github.com/runbot-hq/translate-cli/releases/latest/download/translate-cli-bin',
       '--output', dest,
     ])
@@ -238,17 +236,27 @@ async function run(): Promise<void> {
 
     const translateBin = path.join(process.env.RUNNER_TEMP ?? os.tmpdir(), 'translate-cli-bin')
 
-    if (!fs.existsSync(translateBin)) {
+    // `downloaded` tracks whether we fetched the binary this run or reused a
+    // cached copy from RUNNER_TEMP. Used to tailor the accessSync error message:
+    // a non-executable binary after a fresh download is a bug; after a cache hit
+    // it likely means RUNNER_TEMP was corrupted or the umask changed between jobs.
+    const downloaded = !fs.existsSync(translateBin)
+    if (downloaded) {
       downloadTranslateCli(translateBin)
     } else {
       core.info(`[translate] translate-cli-bin already present at ${translateBin}, skipping download`)
     }
 
+    // Check executable bit explicitly. downloadTranslateCli calls chmodSync so a
+    // non-executable binary after a fresh download is unexpected — it indicates a
+    // bug. On the cache-hit path it may mean the binary was corrupted in RUNNER_TEMP
+    // (e.g. overzealous umask reset between jobs on a self-hosted runner).
     try {
       fs.accessSync(translateBin, fs.constants.X_OK)
     } catch {
-      throw new Error(
-        `translate-cli-bin at ${translateBin} is not executable. This is unexpected after download — please file a bug.`
+      throw new Error(downloaded
+        ? `translate-cli-bin at ${translateBin} is not executable after download — this is unexpected, please file a bug.`
+        : `translate-cli-bin at ${translateBin} is not executable — it may have been corrupted in RUNNER_TEMP. Delete it and re-run.`
       )
     }
 
@@ -296,7 +304,6 @@ async function run(): Promise<void> {
     if (sourceLanguage) {
       args.push('--source-language', sourceLanguage)
     }
-
     if (languages) {
       args.push('--languages', languages)
     }
@@ -306,7 +313,6 @@ async function run(): Promise<void> {
     if (manifest) {
       args.push('--manifest', manifest)
     }
-
     if (debugInput) {
       args.push('--debug')
     }
@@ -329,9 +335,7 @@ async function run(): Promise<void> {
         stdout = r.stdout
         if (r.stderr) core.debug(`[translate] stderr: ${r.stderr}`)
       } catch (e2) {
-        throw new Error(
-          `[translate] Attempt 2 failed (binary: ${translateBin}): ${String(e2)}`
-        )
+        throw new Error(`[translate] Attempt 2 failed (binary: ${translateBin}): ${String(e2)}`)
       }
     }
 
