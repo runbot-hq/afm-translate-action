@@ -25686,18 +25686,160 @@ const core = __importStar(__nccwpck_require__(7484));
 const child_process_1 = __nccwpck_require__(5317);
 const path = __importStar(__nccwpck_require__(6928));
 const fs = __importStar(__nccwpck_require__(9896));
+const os = __importStar(__nccwpck_require__(857));
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 /**
+ * Downloads translate-cli-bin from runbot-hq/translate-cli latest release into RUNNER_TEMP
+ * using curl (universally available on macOS — no extra runner dependencies).
+ *
+ * WHY execFileSync NOT execSync:
+ * execFileSync is used deliberately — args are a plain array passed directly
+ * to the OS, no shell involved, no injection risk from the URL constant.
+ * Do NOT refactor to execSync with a shell string.
+ *
+ * WHY RUNNER_TEMP NOT GITHUB_ACTION_PATH:
+ * The binary is written to RUNNER_TEMP (not the workspace or action path) so it is:
+ *   - Cleaned up automatically after the job (on GitHub-hosted runners)
+ *   - Not committed or staged into the caller's repo checkout
+ *   - Shared across steps in the same job without re-downloading
+ *
+ * WHY A FLAT FILENAME (translate-cli-bin, not translate-cli-bin-<jobId>):
+ * RUNNER_TEMP is per-job on GitHub-hosted runners — two jobs never share the
+ * same RUNNER_TEMP directory, so a flat name cannot race. On self-hosted runners
+ * with a shared RUNNER_TEMP, two concurrent jobs could theoretically collide on
+ * this filename — but self-hosted runners in this org are single-job by
+ * configuration, and the same-org trust boundary makes a stale binary acceptable.
+ * A unique filename (e.g. translate-cli-bin-$GITHUB_RUN_ID) would defeat the
+ * same-job cache-skip optimisation. The flat name is intentional.
+ *
+ * RUNNER_TEMP PERSISTENCE ON SELF-HOSTED RUNNERS:
+ * RUNNER_TEMP is per-job on GitHub-hosted runners and is cleaned automatically.
+ * On self-hosted runners, persistence is operator-controlled — it is NOT
+ * guaranteed to be cleaned between jobs unless the runner is configured with
+ * --ephemeral or the operator explicitly cleans it. A stale binary from a prior
+ * job run will be silently reused by the fs.existsSync skip-download guard.
+ * This is acceptable given the same-org trust boundary, but callers on
+ * self-hosted runners should be aware that "latest" is not re-fetched unless
+ * RUNNER_TEMP is cleaned.
+ *
+ * WHY releases/latest NOT A PINNED TAG OR SHA:
+ * The URL resolves to whatever is currently the latest release at
+ * runbot-hq/translate-cli — no SHA pinning, no checksum verification.
+ * This is a conscious architectural tradeoff because:
+ *   - runbot-hq controls both this repo and translate-cli (same org, same trust boundary)
+ *   - curl --fail catches 404 / HTTP errors and exits non-zero (no silent failure)
+ *   - The self-hosted runner has no internet exposure beyond GitHub
+ * FUTURE NOTE: when runbot-hq/translate-cli cuts a v2 major release, releases/latest
+ * will silently follow it. Review the download URL at that point and pin to a
+ * major version tag (e.g. /releases/download/v1-latest/...) if breaking changes
+ * are expected.
+ *
+ * WHY --retry DOES NOT RETRY 4xx:
+ * --retry 3 --retry-delay 2 retries up to 3 times on transient network errors
+ * (TCP reset, CDN hiccup on the GitHub releases redirect chain). curl --fail
+ * still exits non-zero on HTTP 4xx/5xx — --retry does NOT retry those.
+ * A 404 means the release asset does not exist and retrying will not help.
+ *
+ * WHY NOT --write-out FOR HTTP STATUS:
+ * --write-out defaults to stdout. execFileSync captures stdout and the return
+ * value is ignored here, so the HTTP status line would be silently swallowed —
+ * the opposite of the diagnostic intent. --show-error already writes curl's
+ * error reason to stderr and is sufficient for diagnosing a 404.
+ * Do NOT add --write-out here.
+ *
+ * PARTIAL-FILE AND ZERO-BYTE CLEANUP:
+ * If curl fails after writing partial bytes, the try/catch calls unlinkSync(dest)
+ * before re-throwing. Without cleanup, a re-run finds existsSync(dest) === true,
+ * skips the download, and fails at accessSync(X_OK) with a confusing error.
+ * After a successful curl exit, statSync guards against two scenarios:
+ *   1. curl exits 0 but never creates the file (RUNNER_TEMP read-only / missing)
+ *      — statSync is wrapped in try/catch; ENOENT is caught, cleaned up, re-thrown
+ *      with a clear message. Do NOT use a bare statSync here.
+ *   2. curl exits 0 with a zero-byte file (CDN 200 + empty body before --fail)
+ *      — caught by the size === 0 check.
+ * Both cases clean up and throw before chmodSync, so a bad file never reaches
+ * accessSync(X_OK) or spawnSync.
+ * Do NOT remove either the try/catch on statSync or the size === 0 check.
+ */
+function downloadTranslateCli(dest) {
+    core.info('[translate] Downloading translate-cli-bin from runbot-hq/translate-cli latest release...');
+    try {
+        (0, child_process_1.execFileSync)('curl', [
+            '--fail',
+            '--silent',
+            '--show-error',
+            '--location',
+            '--retry', '3',
+            '--retry-delay', '2',
+            'https://github.com/runbot-hq/translate-cli/releases/latest/download/translate-cli-bin',
+            '--output', dest,
+        ]);
+    }
+    catch (e) {
+        // Clean up any partial file curl may have written before throwing.
+        // Without this, a re-run of the same job step finds fs.existsSync(dest)
+        // true, skips the download, then fails at fs.accessSync(X_OK) with a
+        // confusing error instead of retrying. Do NOT remove this cleanup.
+        try {
+            fs.unlinkSync(dest);
+        }
+        catch { /* ignore — file may not exist */ }
+        throw e;
+    }
+    // Guard against missing or zero-byte output. Do NOT remove this block.
+    // See JSDoc above for the full rationale.
+    let stat;
+    try {
+        stat = fs.statSync(dest);
+    }
+    catch {
+        try {
+            fs.unlinkSync(dest);
+        }
+        catch { /* ignore */ }
+        throw new Error(`translate-cli-bin was not written to ${dest} — curl exited 0 but the file does not exist. ` +
+            'RUNNER_TEMP may be read-only or non-existent on this runner.');
+    }
+    if (stat.size === 0) {
+        try {
+            fs.unlinkSync(dest);
+        }
+        catch { /* ignore */ }
+        throw new Error('curl downloaded a zero-byte translate-cli-bin — the release asset may be missing or the CDN returned an empty response');
+    }
+    fs.chmodSync(dest, 0o755);
+    core.info(`[translate] Downloaded translate-cli-bin to ${dest}`);
+}
+/**
  * Calls translate-cli-bin via spawnSync with an explicit argv array.
  *
- * spawnSync is used instead of execSync deliberately:
- * - Args pass directly to the OS — no shell metacharacter expansion.
- * - User-supplied values (language codes, file paths) cannot escape as shell
- *   injection via spaces, semicolons, backticks, $(), etc.
- * - The binary name is hardcoded to `translate-cli-bin` (not `translate-cli`)
- *   to avoid future name collision with a source directory of the same name.
+ * WHY spawnSync NOT execSync:
+ * spawnSync passes args directly to the OS as an argv array — no shell
+ * metacharacter expansion. User-supplied values (language codes, file paths)
+ * cannot escape as shell injection via spaces, semicolons, backticks, $(), etc.
+ * Do NOT refactor to execSync with a shell string.
+ *
+ * WHY translate-cli-bin NOT translate-cli:
+ * The binary is named translate-cli-bin (not translate-cli) to avoid a POSIX
+ * name collision with the Swift source package directory of the same name if
+ * the repos are ever co-located. Callers must use translate-cli-bin. Do NOT
+ * rename it or add a symlink named translate-cli.
+ *
+ * WHY 300s TIMEOUT:
+ * 5 minutes per attempt. With one retry this means up to ~10 min wall time
+ * (5m attempt 1 + 10s delay + 5m attempt 2). Large repos with many locales
+ * and long .xcstrings files legitimately take several minutes. This is
+ * intentional — do NOT reduce the timeout without profiling against a large
+ * real-world .xcstrings file. A timeout surfaces as result.error (ETIMEDOUT),
+ * which is non-fatal and will be retried by the caller.
+ *
+ * WHY 10MB maxBuffer:
+ * translate-cli stdout is three key=value lines (≤30 bytes total). The 10 MB
+ * ceiling exists only to prevent a pathological binary crash from filling the
+ * Node.js buffer and OOMing the runner process. It will never be reached in
+ * normal operation.
  */
 function translateCli(bin, args) {
     if (core.isDebug()) {
@@ -25705,11 +25847,6 @@ function translateCli(bin, args) {
     }
     const result = (0, child_process_1.spawnSync)(bin, args, {
         encoding: 'utf8',
-        // 5-minute timeout per attempt. With one retry this means up to ~10 min wall time
-        // (5m attempt 1 + 10s delay + 5m attempt 2) for very large .xcstrings files.
-        // This is intentional: large repos with many locales legitimately take several minutes.
-        // Callers with large jobs should be aware of this ceiling.
-        // A timeout surfaces as result.error (ETIMEDOUT), which is non-fatal and will be retried.
         timeout: 300_000,
         maxBuffer: 10 * 1024 * 1024,
     });
@@ -25731,39 +25868,33 @@ function translateCli(bin, args) {
  *
  * Non-fatal (retry may help): model cold-start, temporary framework crash, I/O blip.
  *
- * Substring matching is intentional — Apple's error messages are not versioned or
- * guaranteed stable, so we match on the most stable sub-phrase rather than the full string.
- * Verified match table (lower-cased actual message → which check fires):
+ * WHY SUBSTRING MATCHING NOT EXACT MATCHING:
+ * Apple's error messages are not versioned or guaranteed stable. We match on
+ * the most stable sub-phrase rather than the full string to avoid breaking on
+ * minor Apple framework wording changes. The match table is verified:
  *   'translation framework requires macos 26+' → 'requires macos 26'  ✔
  *   'language pack not installed for ...'      → 'language pack not installed'  ✔
  *   'unsupported language pair: xx-YY'         → 'unsupported language pair'  ✔
+ *   permission/sandbox errors                  → 'eacces' / 'not authorized'  ✔
  *
  * COUPLING NOTE — two matches are owned by THIS codebase, not by Apple:
  *   'unsupported language pair' → TranslationEngineError.unsupportedPair.description (TranslationEngine.swift)
  *   'requires macos 26'         → TranslationEngineError.requiresmacOS26.description  (TranslationEngine.swift)
- * If either Swift description string changes, the corresponding match here silently stops
- * firing: 'unsupported language pair' would be retried instead of marked fatal; 'requires
- * macos 26' would fall through to a retry rather than immediately failing. Always update
- * both files together. The other matches ('language pack not installed', 'eacces', etc.)
- * come from Apple / the OS and are NOT under our control.
- *   permission/sandbox errors                  → 'eacces' / 'not authorized'  ✔
+ * If either Swift description string changes, the corresponding match here silently
+ * stops firing: the error will be retried instead of immediately failed. Always
+ * update both files together when changing these strings.
  *
- * macOS 26.0–26.3 caveat: on those OS versions, TranslationEngine skips the
- * LanguageAvailability preflight check (API requires 26.4). If a language pack is missing,
- * Apple's framework throws an opaque error whose message is NOT controlled by us and may
- * NOT match 'language pack not installed' below. In that case isFatalTranslateError returns
- * false and the error is retried once — harmless but inefficient. If you observe spurious
- * retries on 26.0–26.3 runners for missing packs, identify the opaque error substring and
- * add it here. See also: TranslationEngine.swift macOS 26.0–26.3 fallback branch comment.
+ * macOS 26.0–26.3 caveat: LanguageAvailability preflight requires 26.4. On earlier
+ * versions, a missing language pack throws an opaque Apple error that may NOT match
+ * 'language pack not installed'. In that case this function returns false and the
+ * error is retried once — harmless but inefficient. If you observe spurious retries
+ * on 26.0–26.3 for missing packs, identify the opaque substring and add it here.
  */
 function isFatalTranslateError(e) {
     const msg = String(e).toLowerCase();
     return (msg.includes('language pack not installed') ||
         msg.includes('unsupported language pair') ||
         msg.includes('requires macos 26') ||
-        // 'translation framework' match intentionally removed: it was over-broad and matched
-        // transient crash messages that should be retried. The two cases it was meant to catch
-        // (requiresmacOS26, languagePackNotInstalled) are already covered by the lines above.
         msg.includes('eacces') ||
         msg.includes('not authorized') ||
         msg.includes('mdm policy'));
@@ -25776,12 +25907,17 @@ function isFatalTranslateError(e) {
  *   languages_completed=de,fr,ja
  *   languages_failed=zh-Hans
  *
- * Parsing is done here rather than in the shell step so the action can set
- * typed `core.setOutput()` values and emit structured step-summary content
- * without a jq dependency on the runner.
+ * WHY parseInt(val, 10) || 0:
+ * Intentional NaN coercion, not a silent data-loss bug. parseInt returns NaN
+ * only for fully non-numeric strings. parseInt("0", 10) returns 0 — `0 || 0`
+ * is still 0, no false zero. translate-cli always emits a clean integer; the
+ * || 0 guard exists only to prevent NaN propagating to setOutput/summary on a
+ * hypothetical future malformed line. Do NOT replace with Number() — it is
+ * less strict about leading-digit strings like "1abc".
  *
- * `val.split('=')` with `rest.join('=')` handles the (unlikely) case where
- * a value itself contains `=` characters.
+ * WHY rest.join('=') NOT rest[0]:
+ * Handles the (unlikely) case where a value itself contains '=' characters.
+ * Splitting on '=' and re-joining the tail is safer than assuming one '='.
  */
 function parseOutput(stdout) {
     const lines = stdout.split('\n');
@@ -25793,13 +25929,6 @@ function parseOutput(stdout) {
         const val = rest.join('=').trim();
         switch (key?.trim()) {
             case 'keys_translated':
-                // parseInt(val, 10) || 0 — intentional NaN coercion, not a silent data-loss bug.
-                // parseInt returns NaN only for fully non-numeric strings (e.g. "abc").
-                // parseInt("0", 10) returns 0, so `0 || 0` is still 0 — no false zero.
-                // Note: parseInt("1text", 10) returns 1 (leading digits), not NaN — but translate-cli
-                // is the only producer of this line and always emits a clean integer. The || 0
-                // guard exists solely to prevent a NaN from propagating to setOutput/summary on a
-                // hypothetical future malformed line. It is not masking any real data loss.
                 keysTranslated = parseInt(val, 10) || 0;
                 break;
             case 'languages_completed':
@@ -25817,92 +25946,87 @@ function parseOutput(stdout) {
 // ---------------------------------------------------------------------------
 async function run() {
     try {
-        // Resolve debug early — used both for core.debug() gating and --debug flag passthrough.
-        // NOTE: core.isDebug() reads RUNNER_DEBUG (set by the runner at process startup).
-        // Setting ACTIONS_STEP_DEBUG at runtime in the same process has no effect on
-        // core.isDebug() — the runner does not re-read it after startup. The debug input
-        // therefore controls CLI verbosity via --debug (passed to translate-cli-bin below),
-        // not via ACTIONS_STEP_DEBUG. Do NOT reintroduce the ACTIONS_STEP_DEBUG assignment.
-        const debugInput = core.getInput('debug') === 'true';
-        const actionPath = process.env.GITHUB_ACTION_PATH ?? path.join(__dirname, '..');
-        // Binary is committed as `translate-cli-bin` (not `translate-cli`) to avoid
-        // any future name collision with a source directory of the same name.
-        // Same vendoring pattern used by `afm-cli-bin` in afm-release-notes-action.
-        // The binary is updated manually: download the new build from runbot-hq/translate-cli
-        // releases and commit it to the repo root.
-        //
-        // This action has zero runtime dependencies: no gh, curl, or network calls happen
-        // when the action runs. Everything needed is committed to this repo.
-        const translateBin = path.join(actionPath, 'translate-cli-bin');
-        if (!fs.existsSync(translateBin)) {
-            throw new Error(`translate-cli-bin binary not found at ${translateBin}. ` +
-                'This action requires a self-hosted macOS 26+ arm64 runner with Apple Translation enabled. ' +
-                'It cannot run on GitHub-hosted Linux or Windows runners.');
+        const debugInput = core.getInput('debug') === 'true'; // see WHY NOT ACTIONS_STEP_DEBUG below
+        const translateBin = path.join(process.env.RUNNER_TEMP ?? os.tmpdir(), 'translate-cli-bin');
+        // WHY os.tmpdir() FALLBACK: RUNNER_TEMP is always set on GitHub-hosted and
+        // correctly configured self-hosted runners. os.tmpdir() is a last-resort
+        // fallback for local action testing only — it is not a supported production path.
+        // `downloaded` tracks whether we fetched the binary this run or reused a
+        // cached copy from RUNNER_TEMP.
+        // WHY CACHE-SKIP VIA existsSync:
+        // On GitHub-hosted runners RUNNER_TEMP is per-job, so this only fires for
+        // multi-step sharing within the same job (rare but valid). On self-hosted
+        // runners with a persistent RUNNER_TEMP, this reuses a binary from a prior
+        // job run — acceptable given the same-org trust boundary. The flat filename
+        // is intentional (see downloadTranslateCli JSDoc — WHY A FLAT FILENAME).
+        // Do NOT add a uniqueness suffix: it would defeat this cache-skip optimisation.
+        const downloaded = !fs.existsSync(translateBin);
+        if (downloaded) {
+            downloadTranslateCli(translateBin);
         }
-        // Check executable bit explicitly: a missing `+x` bit is a common post-checkout
-        // state on some runners and produces a confusing EACCES error otherwise.
+        else {
+            core.info(`[translate] translate-cli-bin already present at ${translateBin}, skipping download`);
+        }
+        // WHY accessSync AFTER existsSync (not redundant):
+        // downloadTranslateCli calls chmodSync(0o755) so a non-executable bit after
+        // a fresh download is a genuine bug. On the cache-hit path, the binary may
+        // have lost its executable bit between jobs (overzealous umask on self-hosted
+        // runner). The `downloaded` boolean tailors the error message for each path:
+        // - fresh download: "unexpected — please file a bug"
+        // - cache hit: "corrupted in RUNNER_TEMP — delete and re-run"
+        // This check is NOT redundant with chmodSync; it is the user-facing guard.
         try {
             fs.accessSync(translateBin, fs.constants.X_OK);
         }
         catch {
-            throw new Error(`translate-cli-bin at ${translateBin} is not executable. Run: chmod +x translate-cli-bin and recommit.`);
+            throw new Error(downloaded
+                ? `translate-cli-bin at ${translateBin} is not executable after download — this is unexpected, please file a bug.`
+                : `translate-cli-bin at ${translateBin} is not executable — it may have been corrupted in RUNNER_TEMP. Delete it and re-run.`);
         }
-        // Resolve inputs
         const input = core.getInput('input').trim();
         const output = core.getInput('output').trim();
         const languages = core.getInput('languages').trim();
         const config = core.getInput('config').trim();
         const manifest = core.getInput('manifest').trim();
-        // source_language intentionally defaults to '' (empty string) — not 'en'.
+        // WHY source_language DEFAULTS TO '' NOT 'en':
         // When empty, --source-language is NOT passed to translate-cli, so the CLI
-        // reads sourceLanguage directly from the .xcstrings file. This is correct for
-        // any .xcstrings file regardless of its declared source language.
-        // Only set source_language explicitly when:
-        //   a) translating .strings files (no embedded source language)
-        //   b) the .xcstrings sourceLanguage field is wrong or absent
-        // Passing 'en' when the .xcstrings declares a different source language causes
-        // DiffExtractor to look up source values under 'en' and find nothing — 0 keys translated.
+        // reads sourceLanguage from the .xcstrings file directly. Passing 'en'
+        // unconditionally would silently override a non-English sourceLanguage,
+        // causing DiffExtractor to find 0 keys to translate. Only set this explicitly
+        // for .strings files (no embedded source language) or a malformed .xcstrings.
         const sourceLanguage = core.getInput('source_language').trim();
         const quality = core.getInput('quality').trim() || 'high';
         const format = core.getInput('format').trim() || 'xcstrings';
         if (!input) {
             throw new Error('Input `input` is required (path to source .xcstrings / .strings / .md file).');
         }
-        // `languages` and `config` are mutually exclusive alternatives — at least one is required.
-        // `languages` takes precedence if both are provided (handled in translate-cli itself).
+        // WHY languages AND config ARE BOTH ALLOWED:
+        // They are mutually exclusive alternatives — at least one is required.
+        // If both are provided, translate-cli itself gives `languages` precedence.
+        // We do not error here on both-provided to avoid breaking callers that set
+        // a default config and also pass explicit languages for a one-off override.
         if (!languages && !config) {
             throw new Error('Either `languages` or `config` must be provided.');
         }
         if (!fs.existsSync(input)) {
             throw new Error(`Input file not found: ${input}`);
         }
-        // Validate quality — guard here so the error message is clear rather than surfacing
-        // as a cryptic translate-cli exit code.
         if (quality !== 'fast' && quality !== 'high') {
             throw new Error(`Invalid quality value: "${quality}". Must be "fast" or "high".`);
         }
-        // Validate format — same rationale as quality validation above.
         if (!['xcstrings', 'strings', 'markdown'].includes(format)) {
             throw new Error(`Invalid format value: "${format}". Must be "xcstrings", "strings", or "markdown".`);
         }
-        // Resolve output path.
-        // - xcstrings / markdown: output is a file path; default = same as input (in-place update)
-        // - strings: output is a directory; lproj subdirs are created by translate-cli;
-        //   default = dirname(input)
         const resolvedOutput = output ||
             (format === 'strings'
-                ? path.dirname(input)
-                : input);
+                ? path.dirname(input) // strings: output is a directory (lproj subdirs created by CLI)
+                : input); // xcstrings / markdown: in-place update
         const args = [
             '--input', input,
             '--output', resolvedOutput,
             '--quality', quality,
             '--format', format,
         ];
-        // Only pass --source-language when explicitly set by the caller.
-        // When omitted, translate-cli reads sourceLanguage from the .xcstrings file directly.
-        // Passing 'en' unconditionally would silently override a non-English sourceLanguage
-        // in the .xcstrings file, causing DiffExtractor to find 0 keys to translate.
         if (sourceLanguage) {
             args.push('--source-language', sourceLanguage);
         }
@@ -25910,35 +26034,34 @@ async function run() {
             args.push('--languages', languages);
         }
         if (config) {
-            // `config` is intentionally NOT existence-checked before passing to translate-cli.
-            // This is NOT a missing guard — it is a deliberate trade-off:
-            //   Adding fs.existsSync(config) here would break workflows where the config file is
-            //   generated by an earlier step in the same job (e.g. written by a matrix step or
-            //   a prior action). At the point this action runs, the file exists at runtime even
-            //   though it wasn't present at checkout. A pre-flight existsSync would race against
-            //   that and produce a confusing false-negative.
-            // If config is genuinely absent at runtime, translate-cli exits non-zero with a clear
-            // error from LocalizationConfigLoader, which surfaces via spawnSync's non-zero status
-            // and is re-thrown by translateCli() above. The error message is slightly less targeted
-            // than a pre-check, but the failure is still loud and actionable.
+            // WHY config IS NOT existence-checked before passing:
+            // A pre-flight existsSync would break workflows where config is generated
+            // by an earlier step in the same job (written after checkout). translate-cli
+            // exits non-zero with a clear error from LocalizationConfigLoader if the
+            // file is absent at runtime. That error is louder and more actionable than
+            // a false-negative existsSync. Do NOT add an existsSync guard here.
             args.push('--config', config);
         }
         if (manifest) {
             args.push('--manifest', manifest);
         }
-        // Pass --debug to the CLI when the debug input is 'true'.
-        // This drives verbose stderr logging in translate-cli directly.
-        // Do NOT use ACTIONS_STEP_DEBUG for this — setting it at runtime has no effect
-        // on core.isDebug() because the runner reads RUNNER_DEBUG at process startup.
+        // WHY NOT ACTIONS_STEP_DEBUG / RUNNER_DEBUG FOR CLI VERBOSITY:
+        // core.isDebug() reads RUNNER_DEBUG at process startup — setting
+        // ACTIONS_STEP_DEBUG at runtime in the same process has no effect.
+        // The `debug` input controls CLI verbosity via --debug passed to translate-cli-bin.
+        // Do NOT reintroduce an ACTIONS_STEP_DEBUG assignment.
         if (debugInput) {
             args.push('--debug');
         }
         core.info(`[translate] Running translate-cli for languages: ${languages || config || '(from config)'}`);
         core.info(`[translate] Input: ${input} → Output: ${resolvedOutput}`);
-        // Call translate-cli with one retry on non-fatal errors.
-        // The retry handles Apple Translation model cold-start: on the first invocation after
-        // a runner boot, the framework occasionally needs a few seconds to initialise and
-        // returns a transient error. A 10-second delay before retry is enough in practice.
+        // WHY ONE RETRY WITH 10s DELAY (NOT CONFIGURABLE):
+        // The retry handles Apple Translation model cold-start: on the first
+        // invocation after a runner boot, the framework occasionally needs a few
+        // seconds to initialise and returns a transient error. One retry with 10s
+        // delay is sufficient in practice. Making this configurable would add
+        // complexity with no real benefit — callers that need more retries should
+        // wrap this action in their own retry step.
         let stdout = '';
         try {
             const r = translateCli(translateBin, args);
@@ -25949,7 +26072,7 @@ async function run() {
         catch (e) {
             core.debug(`[translate] Attempt 1 error: ${String(e)}`);
             if (isFatalTranslateError(e))
-                throw e; // don't retry fatal errors
+                throw e; // do not retry fatal errors
             core.info('[translate] Attempt 1 failed — retrying in 10s...');
             await new Promise(r => setTimeout(r, 10_000));
             try {
@@ -25963,18 +26086,12 @@ async function run() {
             }
         }
         if (!stdout.trim()) {
-            // Empty stdout means translate-cli exited 0 but produced no output at all.
-            // This should never happen: translate-cli always emits the three key=value lines
-            // even when keys_translated=0 (genuine nothing-to-do). An empty stdout therefore
-            // indicates a silent binary crash or unexpected early exit — not a legitimate no-op.
-            // We fail the step explicitly here so callers don't see a spurious green run with
-            // zero outputs and no indication anything went wrong.
-            // Two-line pattern: setFailed + return. Both lines are required — neither alone is enough.
-            //   core.setFailed() marks the step conclusion as failed but does NOT throw or stop
-            //   execution — code continues running after the call. Without the `return`, the
-            //   setOutput / summary / setFailed-on-all-failed block below would all execute on
-            //   bad (empty) parsed data, producing misleading step outputs.
-            //   The explicit `return` is what actually halts run(). Do not remove either line.
+            // WHY setFailed + return (TWO LINES REQUIRED):
+            // setFailed marks the step conclusion as failed but does NOT stop execution.
+            // Without `return`, the setOutput / summary / failure-policy block below
+            // would execute on empty (bad) parsed data, producing misleading outputs.
+            // Do NOT remove either line. Do NOT replace with `throw` — setFailed is
+            // the correct signal for a user-visible step failure vs. an internal error.
             core.setFailed('[translate] translate-cli produced no stdout — binary may have crashed silently. Check runner logs for stderr output.');
             return;
         }
@@ -25984,66 +26101,41 @@ async function run() {
         if (languagesFailed.length > 0) {
             core.warning(`[translate] Languages failed: ${languagesFailed.join(', ')}`);
         }
-        // Output contract — read this before using these values in workflow steps:
-        //
-        // keys_translated:
-        //   xcstrings/strings: count of source keys translated (0 = nothing changed, safe to skip commit).
-        //   markdown:          1 if ≥1 locale completed, 0 if ALL locales failed.
-        //                      It is NOT a key count. Do NOT gate a commit on `keys_translated > 0`
-        //                      in markdown mode — gate on `languages_completed != ''` instead.
-        //
-        // languages_completed:
-        //   Comma-separated locales that produced output this run.
-        //   In markdown mode this is the ONLY reliable success signal.
-        //   NOTE: a locale appearing here means the CLI exited without throwing for that locale.
-        //   It does NOT guarantee every paragraph was translated — the Apple framework may
-        //   silently drop individual paragraphs (nil clientIdentifier response). When that
-        //   happens the original paragraph is kept in the output and the locale still appears
-        //   as completed. This is a known Apple framework behaviour, not a bug in the action.
-        //
-        // languages_failed:
-        //   Comma-separated locales that threw a fatal or retriable error.
-        //   Empty string (not absent) when no locales failed.
         core.setOutput('keys_translated', String(keysTranslated));
         core.setOutput('languages_completed', languagesCompleted.join(','));
         core.setOutput('languages_failed', languagesFailed.join(','));
-        // addRaw() with `input`, `languages`, `quality` — not an XSS/injection risk here.
-        // These values originate from the workflow YAML in the caller's own repository
-        // (the repo author controls them), not from untrusted external content such as
-        // PR titles, issue bodies, or user comments. The GitHub Actions step summary is
-        // rendered only in the Actions UI for authenticated repo members — it is not
-        // a public-facing surface. addEscaped() would be cleaner hygiene but this is
-        // explicitly NOT a security boundary. If these fields are ever populated from
-        // PR/issue/comment content (e.g. a language code extracted from a PR body),
-        // switch to addEscaped() or sanitise before this call.
+        // WHY addRaw NOT addEscaped:
+        // `input`, `languages`, and `quality` originate from the caller's own workflow
+        // YAML — not from untrusted external content (PR titles, issue bodies, comments).
+        // The step summary is rendered only in the Actions UI for authenticated repo
+        // members, not on a public-facing surface. addEscaped would be cleaner hygiene
+        // but this is explicitly NOT an XSS security boundary.
+        // If these fields are ever populated from PR/issue/comment content, switch to
+        // addEscaped() or sanitise before this call.
         await core.summary
             .addHeading('🌐 Translation Complete')
             .addRaw(`**Input:** \`${input}\`\n`)
             .addRaw(`**Languages:** ${languages || '(from config)'}\n`)
             .addRaw(`**Quality:** ${quality}\n`)
-            // keys_translated is a pre-flight diff count — it is non-zero even when all locales failed
-            // and nothing was written. Label it "Keys pending" on a total-failure run so the summary
-            // doesn't show "Keys translated: 42" alongside "Completed: (none)", which is misleading.
-            // In markdown mode it is 0 or 1 (the document is one unit); label it "(document)" there.
+            // WHY 'Keys pending' ON TOTAL FAILURE:
+            // keys_translated is a pre-flight diff count — it is non-zero even when all
+            // locales failed and nothing was written. Labelling it 'Keys pending' avoids
+            // showing "Keys translated: 42" alongside "Completed: (none)".
             .addRaw(`**${languagesCompleted.length === 0 ? 'Keys pending' : 'Keys translated'}:** ${keysTranslated}${format === 'markdown' ? ' (document)' : ''}\n`)
             .addRaw(`**Completed:** ${languagesCompleted.join(', ') || '(none)'}\n`)
             .addRaw(languagesFailed.length > 0 ? `**Failed:** ${languagesFailed.join(', ')}\n` : '')
             .addRaw(`**Runner:** ${process.env.RUNNER_NAME ?? 'unknown'}\n`)
             .write();
-        // Step failure policy: fail hard only when EVERY language failed (nothing was written).
-        //
-        // Partial failure (some locales failed, others completed) is intentionally NOT a step
-        // failure. Reasons:
-        //   1. The completed locales produced real output that the caller may want to commit.
-        //   2. The failed locales will be re-queued on the next run via the manifest diff.
-        //   3. A hard failure on partial success would discard completed work and require
-        //      the caller to re-translate everything from scratch.
-        //
-        // Partial failure is surfaced via:  core.warning() + languages_failed output.
-        // Callers that want strict all-or-nothing behaviour can check
-        // `languages_failed != ''` themselves and fail their own step.
-        //
-        // Do NOT change this to `languagesFailed.length > 0` without understanding the above.
+        // WHY FAIL ONLY ON TOTAL FAILURE (not on any languagesFailed):
+        // Partial failure (some locales failed, others completed) is intentionally NOT
+        // a step failure. Reasons:
+        //   1. Completed locales produced real output the caller may want to commit.
+        //   2. Failed locales will be re-queued on the next run via the manifest diff.
+        //   3. A hard failure on partial success would discard completed work and force
+        //      re-translation from scratch.
+        // Partial failure is surfaced via core.warning() + languages_failed output.
+        // Callers that want strict all-or-nothing can check `languages_failed != ''`
+        // and fail their own step. Do NOT change this to `languagesFailed.length > 0`.
         if (languagesFailed.length > 0 && languagesCompleted.length === 0) {
             core.setFailed(`All languages failed: ${languagesFailed.join(', ')}`);
         }
